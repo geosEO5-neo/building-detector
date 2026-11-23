@@ -1,5 +1,8 @@
 # HOT Semi-Auto Building Detector (JOSM Plugin)
 
+> [!WARNING]
+> **Status: experimentell.** Die Erkennung ist bisher nur mit synthetisch erzeugten Testbildern geprüft und **nicht an echten Luftbildern validiert**. Jedes erzeugte Gebäude muss vor dem Hochladen von Hand mit dem Luftbild verglichen und bei Bedarf korrigiert oder gelöscht werden. Bitte keine ungeprüften Ergebnisse nach OpenStreetMap hochladen.
+
 Ein spezialisiertes JOSM-Plugin für die semi-automatische Erfassung von Gebäuden aus Luftbildern, optimiert für Aufgaben im **HOT Tasking Manager**. 
 
 Das Plugin nutzt fortschrittliche Fernerkundungsmethoden (Kantendetektion, Schattenwurf-Analyse, Vegetationsmaskierung) kombiniert mit strengen geodätischen Regeln, um realistische, topologisch korrekte OSM-Gebäude zu generieren.
@@ -72,6 +75,7 @@ xvfb-run ant test-gui    # dasselbe ohne Bildschirm, z. B. auf einem Linux-Serve
 - **`ant test`** prüft die Bildverarbeitung (Erkennung, Suchfenster, Lage- und Größentreue der Umrisse im Subpixelbereich), die Konturgeometrie, die Georeferenzierung (Pixelkonvention, Bodenauflösung gegen die Ellipsoidformeln, Winkeltreue) und die Erzeugung der OSM-Objekte gegen unabhängig gerechnete Sollkoordinaten.
 - **`ant test-gui`** startet JOSM offline mit einem temporären Profil unter `build-test/` (das eigene JOSM-Profil bleibt unberührt), blendet ein synthetisches Luftbild ein und bedient die Action samt Dialogen: Suchbereiche, Verschieben der Karte während der Berechnung, Duplikatvermeidung, Rückgängig und die Warnung bei nicht winkeltreuer Projektion. Ohne grafische Oberfläche wird der Test übersprungen.
 - Die Tests übersetzen in ein eigenes Verzeichnis `build-test/`; `build/` und `dist/` werden nicht verändert.
+- **Automatisch auf GitHub**: Bei jedem Push und Pull Request führt GitHub Actions `ant test` aus (`.github/workflows/tests.yml`). Der GUI-Test läuft dort nicht.
 
 ## 🤝 Mitwirken & Lizenz
 
