@@ -1,7 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+// Copyright (C) 2026 Sero. Lizenz: GNU GPL, Version 2 oder später; siehe Datei LICENSE.
 package org.openstreetmap.josm.plugins.buildingdetector;
 
 import java.awt.Polygon;
 import java.awt.Rectangle;
+import java.awt.geom.Point2D;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -11,10 +14,15 @@ import org.openstreetmap.josm.plugins.buildingdetector.ImageProcessor.Point;
  * Repräsentiert eine geodätisch und fernerkundlich ausgewertete Gebäudekontur.
  * Speichert sowohl die rohen Randpunkte als auch die orthogonalisierten Eckpunkte,
  * die Hauptorientierung (Azimut), Schattenwurf-Indikatoren und Nachbarschafts-Scores.
+ *
+ * Koordinatenkonvention: Alle Koordinaten sind Pixelindex-Koordinaten des Luftbildes, d. h. ein
+ * ganzzahliger Wert bezeichnet das Zentrum eines Pixels. Die Eckpunkte werden subpixelgenau
+ * (double) geführt, damit weder die OMBB-Berechnung noch spätere Drehungen die Geometrie durch
+ * Runden auf ganze Pixel verschlechtern.
  */
 public class BuildingContour {
 
-    private List<Point> corners;
+    private List<Point2D.Double> corners;
     private List<Point> rawBoundaryPoints;
     private double dominantAngleRad; // Hauptorientierung im Bogenmaß [-pi/2, pi/2]
     private double rectangularity;   // Verhältnis wahre Fläche zu OMBB-Fläche [0..1]
@@ -33,8 +41,29 @@ public class BuildingContour {
     }
 
     public BuildingContour(List<Point> corners, List<Point> rawBoundaryPoints, double dominantAngleRad, double rectangularity) {
-        this.corners = new ArrayList<>(corners);
-        this.rawBoundaryPoints = rawBoundaryPoints != null ? new ArrayList<>(rawBoundaryPoints) : new ArrayList<>(corners);
+        this(dominantAngleRad, rectangularity, toExact(corners),
+            rawBoundaryPoints != null ? rawBoundaryPoints : corners);
+    }
+
+    /**
+     * Erzeugt eine Kontur aus subpixelgenauen Eckpunkten.
+     *
+     * @param exactCorners      Geordnete Eckpunkte in Pixelindex-Koordinaten (subpixelgenau)
+     * @param rawBoundaryPoints Rohe Randpixel der Region
+     * @param dominantAngleRad  Hauptorientierung im Bogenmaß
+     * @param rectangularity    Verhältnis wahre Fläche zu OMBB-Fläche [0..1]
+     */
+    public static BuildingContour fromExactCorners(
+            List<Point2D.Double> exactCorners, List<Point> rawBoundaryPoints,
+            double dominantAngleRad, double rectangularity) {
+        return new BuildingContour(dominantAngleRad, rectangularity, exactCorners,
+            rawBoundaryPoints != null ? rawBoundaryPoints : toRounded(exactCorners));
+    }
+
+    private BuildingContour(double dominantAngleRad, double rectangularity,
+            List<Point2D.Double> exactCorners, List<Point> rawBoundaryPoints) {
+        this.corners = copyExact(exactCorners);
+        this.rawBoundaryPoints = new ArrayList<>(rawBoundaryPoints);
         this.dominantAngleRad = normalizeAngleHalfPi(dominantAngleRad);
         this.rectangularity = Math.max(0.0, Math.min(1.0, rectangularity));
         this.shadowScore = 0.0;
@@ -43,12 +72,53 @@ public class BuildingContour {
         this.confidenceScore = 0.5;
     }
 
+    /**
+     * Eckpunkte, auf ganze Pixel gerundet (Abwärtskompatibilität, Bildschirmdarstellung).
+     * Für die Georeferenzierung {@link #getExactCorners()} verwenden.
+     */
     public List<Point> getCorners() {
-        return Collections.unmodifiableList(corners);
+        return Collections.unmodifiableList(toRounded(corners));
+    }
+
+    /**
+     * Subpixelgenaue Eckpunkte in Pixelindex-Koordinaten (ganzzahlig = Pixelzentrum).
+     *
+     * @return Kopie der Eckpunktliste
+     */
+    public List<Point2D.Double> getExactCorners() {
+        return Collections.unmodifiableList(copyExact(corners));
     }
 
     public void setCorners(List<Point> corners) {
-        this.corners = new ArrayList<>(corners);
+        this.corners = toExact(corners);
+    }
+
+    public void setExactCorners(List<Point2D.Double> exactCorners) {
+        this.corners = copyExact(exactCorners);
+    }
+
+    private static List<Point2D.Double> toExact(List<Point> points) {
+        List<Point2D.Double> exact = new ArrayList<>(points.size());
+        for (Point p : points) {
+            exact.add(new Point2D.Double(p.x, p.y));
+        }
+        return exact;
+    }
+
+    private static List<Point2D.Double> copyExact(List<Point2D.Double> points) {
+        List<Point2D.Double> copy = new ArrayList<>(points.size());
+        for (Point2D.Double p : points) {
+            copy.add(new Point2D.Double(p.x, p.y));
+        }
+        return copy;
+    }
+
+    private static List<Point> toRounded(List<Point2D.Double> points) {
+        List<Point> rounded = new ArrayList<>(points.size());
+        for (Point2D.Double p : points) {
+            rounded.add(new Point((int) Math.round(p.x), (int) Math.round(p.y)));
+        }
+        return rounded;
     }
 
     public List<Point> getRawBoundaryPoints() {
@@ -67,9 +137,9 @@ public class BuildingContour {
         double sum = 0.0;
         int n = corners.size();
         for (int i = 0; i < n; i++) {
-            Point p1 = corners.get(i);
-            Point p2 = corners.get((i + 1) % n);
-            sum += (double) p1.x * p2.y - (double) p2.x * p1.y;
+            Point2D.Double p1 = corners.get(i);
+            Point2D.Double p2 = corners.get((i + 1) % n);
+            sum += p1.x * p2.y - p2.x * p1.y;
         }
         return Math.abs(sum) * 0.5;
     }
@@ -95,29 +165,39 @@ public class BuildingContour {
         double perimeter = 0.0;
         int n = corners.size();
         for (int i = 0; i < n; i++) {
-            Point current = corners.get(i);
-            Point next = corners.get((i + 1) % n);
+            Point2D.Double current = corners.get(i);
+            Point2D.Double next = corners.get((i + 1) % n);
             perimeter += Math.hypot(next.x - current.x, next.y - current.y);
         }
         return perimeter;
     }
 
     /**
-     * Berechnet den geometrischen Schwerpunkt (Centroid) der Kontur.
+     * Berechnet den geometrischen Schwerpunkt (Centroid) der Kontur, auf ganze Pixel gerundet.
      *
      * @return Schwerpunkt als Point
      */
     public Point getCenter() {
+        Point2D.Double c = getExactCenter();
+        return new Point((int) Math.round(c.x), (int) Math.round(c.y));
+    }
+
+    /**
+     * Berechnet den subpixelgenauen Schwerpunkt der Eckpunkte.
+     *
+     * @return Schwerpunkt in Pixelindex-Koordinaten
+     */
+    public Point2D.Double getExactCenter() {
         if (corners == null || corners.isEmpty()) {
-            return new Point(0, 0);
+            return new Point2D.Double(0, 0);
         }
         double sumX = 0;
         double sumY = 0;
-        for (Point corner : corners) {
+        for (Point2D.Double corner : corners) {
             sumX += corner.x;
             sumY += corner.y;
         }
-        return new Point((int) Math.round(sumX / corners.size()), (int) Math.round(sumY / corners.size()));
+        return new Point2D.Double(sumX / corners.size(), sumY / corners.size());
     }
 
     /**
@@ -152,9 +232,9 @@ public class BuildingContour {
 
         int n = corners.size();
         for (int i = 0; i < n; i++) {
-            Point prev = corners.get((i - 1 + n) % n);
-            Point curr = corners.get(i);
-            Point next = corners.get((i + 1) % n);
+            Point2D.Double prev = corners.get((i - 1 + n) % n);
+            Point2D.Double curr = corners.get(i);
+            Point2D.Double next = corners.get((i + 1) % n);
 
             double vx1 = prev.x - curr.x;
             double vy1 = prev.y - curr.y;
@@ -187,20 +267,45 @@ public class BuildingContour {
         if (Math.abs(delta) < 1e-4 || corners.isEmpty()) {
             return;
         }
-        Point center = getCenter();
+        Point2D.Double center = getExactCenter();
         double cos = Math.cos(delta);
         double sin = Math.sin(delta);
 
-        List<Point> rotated = new ArrayList<>(corners.size());
-        for (Point p : corners) {
+        // Drehung ohne Runden auf ganze Pixel: die Kontur bleibt ein exaktes Rechteck.
+        List<Point2D.Double> rotated = new ArrayList<>(corners.size());
+        for (Point2D.Double p : corners) {
             double dx = p.x - center.x;
             double dy = p.y - center.y;
-            int rx = (int) Math.round(center.x + dx * cos - dy * sin);
-            int ry = (int) Math.round(center.y + dx * sin + dy * cos);
-            rotated.add(new Point(rx, ry));
+            rotated.add(new Point2D.Double(center.x + dx * cos - dy * sin, center.y + dx * sin + dy * cos));
         }
         this.corners = rotated;
         this.dominantAngleRad = normalizeAngleHalfPi(newAngleRad);
+    }
+
+    /**
+     * Verschiebt die Kontur (Eckpunkte und rohe Randpunkte) um den angegebenen Versatz,
+     * z. B. von ROI-lokalen Koordinaten zurück in die Koordinaten des Gesamtbildes.
+     * Schwerpunkt, Bounding-Box und Fläche werden aus den Eckpunkten berechnet und folgen automatisch.
+     *
+     * @param dx Versatz in x-Richtung (Pixel)
+     * @param dy Versatz in y-Richtung (Pixel)
+     */
+    public void translate(int dx, int dy) {
+        if (dx == 0 && dy == 0) {
+            return;
+        }
+        // Neue Punkt-Objekte anlegen, statt an Ort und Stelle zu verschieben: Aufrufer können
+        // dieselben Point-Instanzen noch in eigenen Listen halten.
+        List<Point2D.Double> movedCorners = new ArrayList<>(corners.size());
+        for (Point2D.Double p : corners) {
+            movedCorners.add(new Point2D.Double(p.x + dx, p.y + dy));
+        }
+        List<Point> movedBoundary = new ArrayList<>(rawBoundaryPoints.size());
+        for (Point p : rawBoundaryPoints) {
+            movedBoundary.add(new Point(p.x + dx, p.y + dy));
+        }
+        this.corners = movedCorners;
+        this.rawBoundaryPoints = movedBoundary;
     }
 
     /**
@@ -221,7 +326,7 @@ public class BuildingContour {
 
     public Polygon toAwtPolygon() {
         Polygon poly = new Polygon();
-        for (Point p : corners) {
+        for (Point p : toRounded(corners)) {
             poly.addPoint(p.x, p.y);
         }
         return poly;
@@ -231,15 +336,20 @@ public class BuildingContour {
         if (corners == null || corners.isEmpty()) {
             return new Rectangle(0, 0, 0, 0);
         }
-        int minX = Integer.MAX_VALUE, maxX = Integer.MIN_VALUE;
-        int minY = Integer.MAX_VALUE, maxY = Integer.MIN_VALUE;
-        for (Point corner : corners) {
+        double minX = Double.MAX_VALUE, maxX = -Double.MAX_VALUE;
+        double minY = Double.MAX_VALUE, maxY = -Double.MAX_VALUE;
+        for (Point2D.Double corner : corners) {
             minX = Math.min(minX, corner.x);
             maxX = Math.max(maxX, corner.x);
             minY = Math.min(minY, corner.y);
             maxY = Math.max(maxY, corner.y);
         }
-        return new Rectangle(minX, minY, Math.max(1, maxX - minX), Math.max(1, maxY - minY));
+        // Kleinstes ganzzahliges Rechteck, das die subpixelgenaue Kontur vollständig enthält
+        int x0 = (int) Math.floor(minX);
+        int y0 = (int) Math.floor(minY);
+        int x1 = (int) Math.ceil(maxX);
+        int y1 = (int) Math.ceil(maxY);
+        return new Rectangle(x0, y0, Math.max(1, x1 - x0), Math.max(1, y1 - y0));
     }
 
     /**

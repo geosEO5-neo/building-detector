@@ -1,7 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+// Copyright (C) 2026 Sero. Lizenz: GNU GPL, Version 2 oder später; siehe Datei LICENSE.
 package org.openstreetmap.josm.plugins.buildingdetector;
 
 import java.awt.Color;
 import java.awt.Rectangle;
+import java.awt.geom.Point2D;
 import java.awt.image.BufferedImage;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
@@ -39,7 +42,7 @@ public class ImageProcessor {
         public double shadowWeight = 0.35;        // Gewicht des Schattenwurfs bei der 3D-Prüfung [0..1]
         public boolean alignWithNeighbors = true; // Gebäudefluchten an Nachbarschaft angleichen
         public boolean showDebugWindows = false;  // Debug-Ansicht für Zwischenschritte
-        public Rectangle regionOfInterest = null; // Optionales Suchfenster im Bild
+        public Rectangle regionOfInterest = null; // Optionales Suchfenster in Bildkoordinaten (null = gesamtes Bild)
     }
 
     /**
@@ -53,14 +56,28 @@ public class ImageProcessor {
 
     /**
      * Hauptpipeline zur fernerkundlichen Gebäudedetektion.
+     *
+     * Ist {@link DetectionConfig#regionOfInterest} gesetzt, läuft die gesamte Pipeline nur auf diesem
+     * Bildausschnitt (in ROI-lokalen Koordinaten). Die zurückgegebenen Konturen liegen immer in den
+     * Koordinaten des übergebenen Gesamtbildes.
      */
     public List<BuildingContour> detectBuildings(BufferedImage aerialImage, DetectionConfig config) {
         if (aerialImage == null) {
             return Collections.emptyList();
         }
 
-        int width = aerialImage.getWidth();
-        int height = aerialImage.getHeight();
+        // Suchfenster (ROI) auf die Bildgrenzen beschneiden; ohne ROI wird das gesamte Bild verarbeitet.
+        Rectangle imageBounds = new Rectangle(0, 0, aerialImage.getWidth(), aerialImage.getHeight());
+        Rectangle roi = (config.regionOfInterest != null)
+            ? config.regionOfInterest.intersection(imageBounds)
+            : imageBounds;
+        if (roi.isEmpty()) {
+            return Collections.emptyList();
+        }
+
+        // Ab hier arbeitet die gesamte Pipeline in ROI-lokalen Koordinaten.
+        int width = roi.width;
+        int height = roi.height;
         double gsd = Math.max(0.03, config.metersPerPixel);
 
         // Umrechnung der geodätischen Flächengrenzen (m²) in Pixel² anhand der aktuellen GSD
@@ -71,7 +88,7 @@ public class ImageProcessor {
             // 1. Spektrale Zerlegung: Luminanz, Vegetationsmaske (ExG) und Schattenmaske extrahieren
             int[][] luminance = new int[width][height];
             boolean[][] vegetationMask = new boolean[width][height];
-            extractSpectralChannels(aerialImage, luminance, vegetationMask);
+            extractSpectralChannels(aerialImage, roi, luminance, vegetationMask);
 
             // 2. Robuste Perzentil-Kontrastspreizung (2% - 98%) & 5x5 Gauß-Glättung
             int[][] enhanced = stretchContrastPercentile(luminance, width, height, 0.02, 0.98);
@@ -103,7 +120,7 @@ public class ImageProcessor {
             //    b) Lokale adaptive Dach-Segmentierung (helle/farbhomogene Nicht-Vegetations-Objekte)
             List<BuildingContour> candidates = extractRoofCandidates(
                 smoothed, closedEdges, vegetationMask, shadowMask, gradMag,
-                width, height, minAreaPx, maxAreaPx, config.regionOfInterest
+                width, height, minAreaPx, maxAreaPx, cannyLowThreshold(config.contrastThreshold)
             );
 
             // 8. Schattenwurf-Bewertung (3D-Verifikation entlang des geschätzten Schattenvektors)
@@ -121,7 +138,15 @@ public class ImageProcessor {
             );
 
             // 10. Topologische Bereinigung (Verschachtelte Konturen & Non-Maximum Suppression bei Überlappung)
-            return resolveOverlapsAndNesting(verified);
+            List<BuildingContour> result = resolveOverlapsAndNesting(verified);
+
+            // 11. Rücktransformation von ROI-lokalen Koordinaten in die Koordinaten des Gesamtbildes
+            if (roi.x != 0 || roi.y != 0) {
+                for (BuildingContour contour : result) {
+                    contour.translate(roi.x, roi.y);
+                }
+            }
+            return result;
 
         } catch (Exception e) {
             e.printStackTrace();
@@ -131,28 +156,37 @@ public class ImageProcessor {
 
     /**
      * Extrahiert Luminanz und markiert Vegetation mittels Excess Green Index (ExG = 2G - R - B)
-     * sowie hoher Grün-Sättigung.
+     * sowie hoher Grün-Sättigung. Gelesen wird nur der Ausschnitt {@code roi}; die Ergebnis-Arrays
+     * sind ROI-lokal indiziert.
      */
-    private void extractSpectralChannels(BufferedImage img, int[][] luminance, boolean[][] vegetationMask) {
-        int width = img.getWidth();
-        int height = img.getHeight();
+    private void extractSpectralChannels(BufferedImage img, Rectangle roi, int[][] luminance, boolean[][] vegetationMask) {
+        int width = roi.width;
+        int height = roi.height;
+		int[] pixels = img.getRGB(roi.x, roi.y, width, height, null, 0, width);
 
-        for (int x = 0; x < width; x++) {
-            for (int y = 0; y < height; y++) {
-                int rgb = img.getRGB(x, y);
+        for (int i = 0, y = 0; y < height; y++) {
+            for (int x = 0; x < width; x++, i++) {
+                int rgb = pixels[i];
+				
                 int r = (rgb >> 16) & 0xFF;
                 int g = (rgb >> 8) & 0xFF;
                 int b = rgb & 0xFF;
-
-                int lum = (int) Math.round(0.299 * r + 0.587 * g + 0.114 * b);
-                luminance[x][y] = lum;
+				
+                luminance[x][y] = (int) Math.round(
+					0.299 * r + 0.587 * g + 0.114 * b
+				);
 
                 // Excess Green Index (ExG) + Normalized Green-Red Difference (NGRDI)
                 int exG = 2 * g - r - b;
-                double ngrdi = (g + r > 15) ? (double) (g - r) / (g + r) : 0.0;
-                if (exG > 28 && ngrdi > 0.06 && g > 45 && lum < 210) {
-                    vegetationMask[x][y] = true;
-                }
+                double ngrdi = (g + r > 15) 
+					? (double) (g - r) / (g + r) 
+					: 0.0;
+
+				vegetationMask[x][y] =
+					exG > 28 &&
+					ngrdi > 0.06 &&
+					g > 45 &&
+					luminance[x][y] < 210;
             }
         }
     }
@@ -208,28 +242,39 @@ public class ImageProcessor {
 
     /**
      * 5x5 Gauß-Filter zur Rauschunterdrückung auf Dachtexturen.
+     *
+     * Separierbare Näherung des ursprünglichen 5x5-Kernels: zwei 1D-Durchläufe mit [1 4 7 4 1].
+     * Das äußere Produkt hat die Gewichtssumme 17 * 17 = 289 (nicht 273 wie der nicht exakt
+     * separierbare Originalkernel); nur mit diesem Divisor bleibt das Ergebnis in [0..255].
      */
     private int[][] applyGaussian5x5(int[][] src, int width, int height) {
-        int[][] kernel = {
-            {1,  4,  7,  4, 1},
-            {4, 16, 26, 16, 4},
-            {7, 26, 41, 26, 7},
-            {4, 16, 26, 16, 4},
-            {1,  4,  7,  4, 1}
-        };
-        int[][] dst = new int[width][height];
-        for (int x = 2; x < width - 2; x++) {
-            for (int y = 2; y < height - 2; y++) {
-                int sum = 0;
-                for (int dx = -2; dx <= 2; dx++) {
-                    for (int dy = -2; dy <= 2; dy++) {
-                        sum += src[x + dx][y + dy] * kernel[dx + 2][dy + 2];
-                    }
-                }
-                dst[x][y] = sum / 273;
-            }
-        }
-        return dst;
+		int[] kernel = {1, 4, 7, 4, 1};
+		int	divisor = 289;
+
+		int[][]	temp = new int[width][height];
+		int[][]	result = new int[width][height];
+
+		for (int y = 0; y < height; y++) {
+			for (int x = 2; x < width - 2; x++) {
+				int	sum = 0;
+				for (int k = -2; k <= 2; k++) {
+					sum += src[x + k][y] * kernel[k + 2];
+				}
+				temp[x][y] = sum;
+			}
+		}
+
+		for (int x = 2; x < width - 2; x++) {
+			for (int y = 2; y < height - 2; y++) {
+				int	sum = 0;
+				for (int k = -2; k <= 2; k++) {
+					sum += temp[x][y + k] * kernel[k + 2];
+				}
+				result[x][y] = sum / divisor;
+			}
+		}
+		
+		return result;
     }
 
     /**
@@ -337,8 +382,8 @@ public class ImageProcessor {
         }
 
         // Hysterese-Schwellenwerte
-        double highThresh = Math.max(18.0, Math.min(180.0, contrastThreshold * 255.0 * 1.35));
-        double lowThresh = highThresh * 0.48;
+        double highThresh = cannyHighThreshold(contrastThreshold);
+        double lowThresh = cannyLowThreshold(contrastThreshold);
 
         boolean[][] edges = new boolean[width][height];
         Deque<Point> queue = new ArrayDeque<>();
@@ -369,6 +414,16 @@ public class ImageProcessor {
             }
         }
         return edges;
+    }
+
+    /** Oberer Hysterese-Schwellenwert des Canny-Detektors auf der normierten Gradientenskala [0..255]. */
+    private static double cannyHighThreshold(double contrastThreshold) {
+        return Math.max(18.0, Math.min(180.0, contrastThreshold * 255.0 * 1.35));
+    }
+
+    /** Unterer Hysterese-Schwellenwert des Canny-Detektors auf der normierten Gradientenskala [0..255]. */
+    private static double cannyLowThreshold(double contrastThreshold) {
+        return cannyHighThreshold(contrastThreshold) * 0.48;
     }
 
     /**
@@ -445,15 +500,16 @@ public class ImageProcessor {
      */
     private List<BuildingContour> extractRoofCandidates(
             int[][] smoothed, boolean[][] closedEdges, boolean[][] vegetationMask, boolean[][] shadowMask,
-            double[][] gradMag, int width, int height, int minAreaPx, int maxAreaPx, Rectangle roi) {
+            double[][] gradMag, int width, int height, int minAreaPx, int maxAreaPx, double minEdgeGradient) {
 
         List<BuildingContour> candidates = new ArrayList<>();
         boolean[][] visited = new boolean[width][height];
 
-        int minX = (roi != null) ? Math.max(2, roi.x) : 2;
-        int minY = (roi != null) ? Math.max(2, roi.y) : 2;
-        int maxX = (roi != null) ? Math.min(width - 2, roi.x + roi.width) : width - 2;
-        int maxY = (roi != null) ? Math.min(height - 2, roi.y + roi.height) : height - 2;
+        // Das Suchfenster (ROI) ist bereits durch width/height abgedeckt; hier nur der Filterrand.
+        int minX = 2;
+        int minY = 2;
+        int maxX = width - 2;
+        int maxY = height - 2;
 
         int[] dx4 = {1, -1, 0, 0};
         int[] dy4 = {0, 0, 1, -1};
@@ -533,7 +589,8 @@ public class ImageProcessor {
                 }
 
                 // Berechne die konvexe Hülle und die flächenminimale orientierte Bounding-Box (OMBB)
-                BuildingContour contour = computeOrientedBoundingContour(boundaryPixels, areaPx);
+                BuildingContour contour = computeOrientedBoundingContour(
+                    boundaryPixels, areaPx, gradMag, width, height, minEdgeGradient);
                 if (contour == null) {
                     continue;
                 }
@@ -554,7 +611,9 @@ public class ImageProcessor {
      * Berechnet über die konvexe Hülle (Andrew's Monotone Chain) und Rotating Calipers
      * das exakt orientierte minimale Hüllrechteck (OMBB) der Gebäuderegion.
      */
-    private BuildingContour computeOrientedBoundingContour(List<Point> boundaryPoints, int truePixelCount) {
+    private BuildingContour computeOrientedBoundingContour(
+            List<Point> boundaryPoints, int truePixelCount,
+            double[][] gradMag, int width, int height, double minEdgeGradient) {
         List<Point> hull = computeConvexHull(boundaryPoints);
         if (hull.size() < 3) {
             return null;
@@ -613,9 +672,20 @@ public class ImageProcessor {
             return null;
         }
 
-        // Rücktransformation der 4 orthogonalen OMBB-Eckpunkte in Bildkoordinaten
         double cos = Math.cos(bestAngle);
         double sin = Math.sin(bestAngle);
+
+        // Die OMBB umschließt bisher nur die Zentren der Randpixel einer Region, die ihrerseits vor der
+        // Kante endet (Glättung, Kantenpixel). Ohne Korrektur fällt das Rechteck systematisch zu klein aus.
+        // Jede Seite wird deshalb auf das Gradientenmaximum, also die tatsächliche Dachkante, verschoben.
+        double[] box = refineSidesToGradientMaximum(
+            cos, sin, bestMinU, bestMaxU, bestMinV, bestMaxV, gradMag, width, height, minEdgeGradient);
+        bestMinU = box[0];
+        bestMaxU = box[1];
+        bestMinV = box[2];
+        bestMaxV = box[3];
+
+        // Rücktransformation der 4 orthogonalen OMBB-Eckpunkte in Bildkoordinaten
         double[][] uvCorners = {
             {bestMinU, bestMinV},
             {bestMaxU, bestMinV},
@@ -623,11 +693,11 @@ public class ImageProcessor {
             {bestMinU, bestMaxV}
         };
 
-        List<Point> corners = new ArrayList<>(4);
+        // Eckpunkte subpixelgenau belassen: Runden auf ganze Pixel würde die Rechtwinkligkeit zerstören
+        // und die Orientierung kurzer Gebäudeseiten um bis zu ca. 1° verfälschen.
+        List<Point2D.Double> corners = new ArrayList<>(4);
         for (double[] uv : uvCorners) {
-            int x = (int) Math.round(uv[0] * cos - uv[1] * sin);
-            int y = (int) Math.round(uv[0] * sin + uv[1] * cos);
-            corners.add(new Point(x, y));
+            corners.add(new Point2D.Double(uv[0] * cos - uv[1] * sin, uv[0] * sin + uv[1] * cos));
         }
 
         // Hauptorientierung der längeren Gebäudeseite zuweisen
@@ -635,7 +705,113 @@ public class ImageProcessor {
         double lenV = bestMaxV - bestMinV;
         double dominantAngle = (lenU >= lenV) ? bestAngle : (bestAngle + Math.PI / 2.0);
 
-        return new BuildingContour(corners, boundaryPoints, dominantAngle, rectangularity);
+        return BuildingContour.fromExactCorners(corners, boundaryPoints, dominantAngle, rectangularity);
+    }
+
+    /** Suchfenster der Kantenverfeinerung entlang der Seitennormalen in Pixeln (negativ = nach innen). */
+    private static final double REFINE_MIN_OFFSET_PX = -1.5;
+    private static final double REFINE_MAX_OFFSET_PX = 3.5;
+    private static final double REFINE_STEP_PX = 0.25;
+
+    /**
+     * Subpixelgenaue Kantenverfeinerung der OMBB: Jede der vier Rechteckseiten wird parallel zu sich
+     * selbst auf die Lage verschoben, an der der mittlere Gradientenbetrag entlang der Seite maximal ist.
+     * Orientierung und Rechtwinkligkeit bleiben unverändert.
+     *
+     * Findet sich im Suchfenster kein signifikantes inneres Maximum (z. B. kontrastarme Dachseite), wird
+     * die Seite nur um die halbe Pixelausdehnung nach außen gesetzt, sodass das Rechteck die Flächen der
+     * Randpixel statt nur deren Zentren umschließt.
+     *
+     * @return {minU, maxU, minV, maxV} des verfeinerten Rechtecks im gedrehten (u, v)-System
+     */
+    private double[] refineSidesToGradientMaximum(
+            double cos, double sin, double minU, double maxU, double minV, double maxV,
+            double[][] gradMag, int width, int height, double minEdgeGradient) {
+
+        // Halbe Ausdehnung eines Pixelquadrats in Richtung der Rechteckachsen
+        double pixelHalfExtent = 0.5 * (Math.abs(cos) + Math.abs(sin));
+
+        double offMinU = refineSideOffset(cos, sin, minU, -1.0, minV, maxV, true, gradMag, width, height, minEdgeGradient);
+        double offMaxU = refineSideOffset(cos, sin, maxU, +1.0, minV, maxV, true, gradMag, width, height, minEdgeGradient);
+        double offMinV = refineSideOffset(cos, sin, minV, -1.0, minU, maxU, false, gradMag, width, height, minEdgeGradient);
+        double offMaxV = refineSideOffset(cos, sin, maxV, +1.0, minU, maxU, false, gradMag, width, height, minEdgeGradient);
+
+        return new double[] {
+            minU - (Double.isNaN(offMinU) ? pixelHalfExtent : offMinU),
+            maxU + (Double.isNaN(offMaxU) ? pixelHalfExtent : offMaxU),
+            minV - (Double.isNaN(offMinV) ? pixelHalfExtent : offMinV),
+            maxV + (Double.isNaN(offMaxV) ? pixelHalfExtent : offMaxV)
+        };
+    }
+
+    /**
+     * Sucht für eine Rechteckseite den Versatz entlang der nach außen gerichteten Normalen, bei dem das
+     * Gradientenprofil sein Maximum hat (Parabel-Interpolation zwischen den Abtastschritten).
+     *
+     * @param sideCoord  Lage der Seite auf ihrer Normalenachse (u bzw. v)
+     * @param outward    +1 bzw. -1: Richtung der Außennormalen auf dieser Achse
+     * @param from       Beginn der Seite auf der Tangentenachse
+     * @param to         Ende der Seite auf der Tangentenachse
+     * @param normalIsU  true, wenn die Seitennormale die u-Achse ist
+     * @return Versatz nach außen in Pixeln oder NaN, wenn kein signifikantes inneres Maximum existiert
+     */
+    private double refineSideOffset(
+            double cos, double sin, double sideCoord, double outward, double from, double to, boolean normalIsU,
+            double[][] gradMag, int width, int height, double minEdgeGradient) {
+
+        // Eckbereiche aussparen: dort überlagern sich die Gradienten der Nachbarseiten
+        double length = to - from;
+        double margin = Math.max(1.0, 0.15 * length);
+        double start = from + margin;
+        double end = to - margin;
+        if (end - start < 3.0) {
+            return Double.NaN;
+        }
+        int samples = Math.max(4, (int) Math.round(end - start) + 1);
+
+        int steps = (int) Math.round((REFINE_MAX_OFFSET_PX - REFINE_MIN_OFFSET_PX) / REFINE_STEP_PX) + 1;
+        double[] profile = new double[steps];
+        int best = -1;
+        for (int i = 0; i < steps; i++) {
+            double normalCoord = sideCoord + outward * (REFINE_MIN_OFFSET_PX + i * REFINE_STEP_PX);
+            double sum = 0.0;
+            for (int k = 0; k < samples; k++) {
+                double tangentCoord = start + (end - start) * k / (samples - 1);
+                double u = normalIsU ? normalCoord : tangentCoord;
+                double v = normalIsU ? tangentCoord : normalCoord;
+                sum += sampleBilinear(gradMag, u * cos - v * sin, u * sin + v * cos, width, height);
+            }
+            profile[i] = sum / samples;
+            if (best < 0 || profile[i] > profile[best]) {
+                best = i;
+            }
+        }
+
+        // Nur ein inneres, ausreichend starkes Maximum ist eine verlässliche Kantenlage
+        if (best <= 0 || best >= steps - 1 || profile[best] < minEdgeGradient) {
+            return Double.NaN;
+        }
+        double left = profile[best - 1];
+        double mid = profile[best];
+        double right = profile[best + 1];
+        double denom = left - 2.0 * mid + right;
+        double subStep = (denom < -1e-9) ? 0.5 * (left - right) / denom : 0.0;
+        return REFINE_MIN_OFFSET_PX + (best + subStep) * REFINE_STEP_PX;
+    }
+
+    /** Bilineare Interpolation eines Rasters an einer subpixelgenauen Position (außerhalb des Bildes: 0). */
+    private static double sampleBilinear(double[][] raster, double x, double y, int width, int height) {
+        int x0 = (int) Math.floor(x);
+        int y0 = (int) Math.floor(y);
+        if (x0 < 0 || y0 < 0 || x0 + 1 >= width || y0 + 1 >= height) {
+            return 0.0;
+        }
+        double fx = x - x0;
+        double fy = y - y0;
+        return raster[x0][y0] * (1.0 - fx) * (1.0 - fy)
+             + raster[x0 + 1][y0] * fx * (1.0 - fy)
+             + raster[x0][y0 + 1] * (1.0 - fx) * fy
+             + raster[x0 + 1][y0 + 1] * fx * fy;
     }
 
     /**

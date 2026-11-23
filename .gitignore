@@ -1,0 +1,3 @@
+# Testartefakte (ant test / ant test-gui)
+/build-test/
+/lib/test/

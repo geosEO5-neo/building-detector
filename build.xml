@@ -14,6 +14,15 @@
     <property name="plugin.build.dir" value="${basedir}/build"/>
     <property name="plugin.jar" value="${plugin.dist.dir}/${ant.project.name}.jar"/>
 
+    <!-- Tests: eigene, nicht versionierte Verzeichnisse. JUnit wird bei Bedarf einmalig geladen und per SHA-256 geprüft. -->
+    <property name="test.dir" location="test"/>
+    <property name="test.build.dir" location="build-test"/>
+    <property name="test.lib.dir" location="lib/test"/>
+    <property name="junit.version" value="6.1.3"/>
+    <property name="junit.sha256" value="e62b96ac475dbcde8599ea905d088f65d90778f86e259b856a49fa5c4ea256ec"/>
+    <property name="junit.jar" location="${test.lib.dir}/junit-platform-console-standalone-${junit.version}.jar"/>
+    <property name="junit.url" value="https://repo1.maven.org/maven2/org/junit/platform/junit-platform-console-standalone/${junit.version}/junit-platform-console-standalone-${junit.version}.jar"/>
+
     <target name="init">
         <mkdir dir="${plugin.build.dir}"/>
         <mkdir dir="${plugin.dist.dir}"/>
@@ -61,6 +70,80 @@
     <target name="clean">
         <delete dir="${plugin.build.dir}"/>
         <delete dir="${plugin.dist.dir}"/>
+        <delete dir="${test.build.dir}"/>
+    </target>
+
+    <target name="test-deps">
+        <mkdir dir="${test.lib.dir}"/>
+        <get src="${junit.url}" dest="${junit.jar}" skipexisting="true"/>
+        <checksum file="${junit.jar}" algorithm="SHA-256" property="${junit.sha256}" verifyProperty="junit.checksum.ok"/>
+        <fail message="SHA-256 von ${junit.jar} stimmt nicht mit junit.sha256 überein. Datei löschen und erneut versuchen.">
+            <condition>
+                <isfalse value="${junit.checksum.ok}"/>
+            </condition>
+        </fail>
+    </target>
+
+    <!-- Plugin- und Testquellen gemeinsam in ein eigenes Verzeichnis übersetzen; build/ und dist/ bleiben unberührt. -->
+    <target name="test-compile" depends="test-deps">
+        <mkdir dir="${test.build.dir}/classes"/>
+        <javac destdir="${test.build.dir}/classes" release="21" debug="true" includeantruntime="false" encoding="UTF-8">
+            <src path="${src.dir}"/>
+            <src path="${test.dir}"/>
+            <classpath>
+                <pathelement location="${junit.jar}"/>
+                <fileset dir="${lib.dir}" includes="*.jar"/>
+            </classpath>
+            <compilerarg value="-Xlint:deprecation"/>
+        </javac>
+    </target>
+
+    <path id="test.classpath">
+        <pathelement location="${test.build.dir}/classes"/>
+        <pathelement location="${junit.jar}"/>
+        <fileset dir="${lib.dir}" includes="*.jar"/>
+    </path>
+
+    <!-- Schnelle Tests ohne Benutzeroberfläche: Bildverarbeitung, Konturgeometrie, Georeferenzierung, OSM-Erzeugung. -->
+    <target name="test" depends="test-compile" description="Führt die Tests ohne Benutzeroberfläche aus">
+        <java classname="org.junit.platform.console.ConsoleLauncher" classpathref="test.classpath" fork="true" failonerror="true">
+            <jvmarg value="-Djava.awt.headless=true"/>
+            <jvmarg value="-Djosm.home=${test.build.dir}/josm-home"/>
+            <arg value="execute"/>
+            <arg value="--scan-classpath=${test.build.dir}/classes"/>
+            <arg value="--exclude-tag=gui"/>
+            <arg value="--fail-if-no-tests"/>
+            <arg value="--disable-banner"/>
+            <arg value="--disable-ansi-colors"/>
+            <arg value="--details=tree"/>
+            <arg value="--details-theme=ascii"/>
+        </java>
+    </target>
+
+    <!-- End-to-End-Test in einer echten JOSM-Instanz. Benötigt eine grafische Oberfläche, z. B. "xvfb-run ant test-gui". -->
+    <target name="test-gui" depends="test-compile" description="Führt den End-to-End-Test in einer JOSM-Instanz aus (benötigt Display)">
+        <java classname="org.junit.platform.console.ConsoleLauncher" classpathref="test.classpath" fork="true" failonerror="true" timeout="300000">
+            <jvmarg value="-Djosm.home=${test.build.dir}/josm-home"/>
+            <!-- Von JOSM beim Start verlangte JVM-Argumente (siehe Manifest der JOSM-JAR) -->
+            <jvmarg value="--add-exports=java.base/sun.security.action=ALL-UNNAMED"/>
+            <jvmarg value="--add-exports=java.desktop/com.sun.imageio.plugins.jpeg=ALL-UNNAMED"/>
+            <jvmarg value="--add-exports=java.desktop/com.sun.imageio.spi=ALL-UNNAMED"/>
+            <jvmarg value="--add-opens=java.base/java.lang=ALL-UNNAMED"/>
+            <jvmarg value="--add-opens=java.base/java.nio=ALL-UNNAMED"/>
+            <jvmarg value="--add-opens=java.base/jdk.internal.loader=ALL-UNNAMED"/>
+            <jvmarg value="--add-opens=java.base/jdk.internal.ref=ALL-UNNAMED"/>
+            <jvmarg value="--add-opens=java.desktop/javax.imageio.spi=ALL-UNNAMED"/>
+            <jvmarg value="--add-opens=java.desktop/javax.swing.text.html=ALL-UNNAMED"/>
+            <jvmarg value="--add-opens=java.prefs/java.util.prefs=ALL-UNNAMED"/>
+            <arg value="execute"/>
+            <arg value="--scan-classpath=${test.build.dir}/classes"/>
+            <arg value="--include-tag=gui"/>
+            <arg value="--fail-if-no-tests"/>
+            <arg value="--disable-banner"/>
+            <arg value="--disable-ansi-colors"/>
+            <arg value="--details=tree"/>
+            <arg value="--details-theme=ascii"/>
+        </java>
     </target>
 
     <target name="install" depends="dist">
