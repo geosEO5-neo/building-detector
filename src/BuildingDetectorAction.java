@@ -7,11 +7,14 @@ import java.awt.Rectangle;
 import java.awt.Robot;
 import java.awt.event.ActionEvent;
 import java.awt.event.KeyEvent;
+import java.awt.geom.Area;
 import java.awt.image.BufferedImage;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
 
 import javax.swing.JCheckBox;
+import javax.swing.JComboBox;
 import javax.swing.JLabel;
 import javax.swing.JOptionPane;
 import javax.swing.JPanel;
@@ -21,7 +24,9 @@ import javax.swing.SwingUtilities;
 
 import org.openstreetmap.josm.actions.JosmAction;
 import org.openstreetmap.josm.data.Bounds;
+import org.openstreetmap.josm.data.osm.BBox;
 import org.openstreetmap.josm.data.osm.DataSet;
+import org.openstreetmap.josm.data.osm.OsmPrimitive;
 import org.openstreetmap.josm.gui.MainApplication;
 import org.openstreetmap.josm.gui.MapView;
 import org.openstreetmap.josm.gui.MapViewState;
@@ -44,6 +49,7 @@ import static org.openstreetmap.josm.tools.I18n.trn;
  * - Unterstützt alle Luftbild-Quellen (Bing, Esri, Maxar, OpenAerialMap, Custom TMS)
  * - Bietet einen kompakten Fernerkundungs-Parameterdialog (Kanten-Schwellenwert, Schattenwurf-Gewicht,
  *   Mindest-/Maximalfläche in m², Nachbarschafts-Fluchtausrichtung)
+ * - Begrenzt die Suche wahlweise auf den heruntergeladenen Bereich, die Auswahl oder den Kartenausschnitt
  * - Friert die Georeferenzierung beim Rendern ein ({@link ImageGeoreference}), sodass Verschieben oder
  *   Zoomen während der Berechnung die Lage der Ergebnisse nicht verfälscht
  * - Vollständig Thread-sicher zwischen Swing-EDT und Worker-Thread
@@ -59,6 +65,21 @@ public class BuildingDetectorAction extends JosmAction {
     private static final double MAX_SCALE_ANISOTROPY = 0.02;
     private static final double MAX_AXIS_SKEW_DEG = 1.0;
 
+    /** Bereich, in dem nach Gebäuden gesucht wird. */
+    private enum SearchArea {
+        DOWNLOADED, SELECTION, VIEW;
+
+        /** Beschriftung im Parameterdialog. */
+        @Override
+        public String toString() {
+            switch (this) {
+                case DOWNLOADED: return tr("Heruntergeladener Bereich (im Kartenausschnitt)");
+                case SELECTION: return tr("Umgebendes Rechteck der Auswahl");
+                default: return tr("Gesamter Kartenausschnitt");
+            }
+        }
+    }
+
     /** Gerendertes Luftbild samt der zum Renderzeitpunkt gültigen Georeferenzierung. */
     private record Capture(BufferedImage image, ImageGeoreference georeference) {
     }
@@ -73,6 +94,7 @@ public class BuildingDetectorAction extends JosmAction {
     private double lastMaxAreaM2 = 2000.0;
     private boolean lastAlignNeighbors = true;
     private boolean lastShowDebug = false;
+    private SearchArea lastSearchArea = null;
 
     public BuildingDetectorAction() {
         super(
@@ -146,12 +168,12 @@ public class BuildingDetectorAction extends JosmAction {
         }
 
         // Kompaktes Tuning-Panel auf dem EDT anzeigen
-        DetectionConfig config = promptDetectionConfig(currentGsd, imageryLayer.getName());
+        DetectionConfig config = promptDetectionConfig(currentGsd, imageryLayer.getName(), dataLayer.getDataSet());
         if (config == null) {
             return; // Vom Benutzer abgebrochen
         }
 
-        performBuildingDetection(imageryLayer, dataLayer, config);
+        performBuildingDetection(imageryLayer, dataLayer, config, lastSearchArea);
     }
 
     /**
@@ -182,10 +204,37 @@ public class BuildingDetectorAction extends JosmAction {
     }
 
     /**
+     * Ermittelt die im aktuellen Zustand wählbaren Suchbereiche. Der heruntergeladene Bereich steht an
+     * erster Stelle: Nur dort sind vorhandene OSM-Gebäude bekannt und Duplikate vermeidbar.
+     */
+    private static List<SearchArea> availableSearchAreas(DataSet dataSet) {
+        List<SearchArea> areas = new ArrayList<>(3);
+        if (dataSet != null && !dataSet.getDataSourceBounds().isEmpty()) {
+            areas.add(SearchArea.DOWNLOADED);
+        }
+        if (dataSet != null && !dataSet.getSelected().isEmpty()) {
+            areas.add(SearchArea.SELECTION);
+        }
+        areas.add(SearchArea.VIEW);
+        return areas;
+    }
+
+    /**
      * Zeigt einen übersichtlichen Parameter-Dialog für Kanten-, Schatten- und Nachbarschaftsparameter.
      */
-    private DetectionConfig promptDetectionConfig(double currentGsd, String imageryName) {
+    private DetectionConfig promptDetectionConfig(double currentGsd, String imageryName, DataSet dataSet) {
         JPanel panel = new JPanel(new GridLayout(0, 2, 8, 6));
+
+        List<SearchArea> searchAreas = availableSearchAreas(dataSet);
+        JComboBox<SearchArea> searchAreaCombo = new JComboBox<>(searchAreas.toArray(new SearchArea[0]));
+        // Letzte Wahl beibehalten, sofern noch verfügbar. Die Auswahl wird nie automatisch vorbelegt:
+        // nach einem Lauf sind die neu erzeugten Gebäude selektiert, ein Folgelauf würde sonst nur
+        // deren Umgebung absuchen.
+        if (lastSearchArea != null && lastSearchArea != SearchArea.SELECTION && searchAreas.contains(lastSearchArea)) {
+            searchAreaCombo.setSelectedItem(lastSearchArea);
+        } else {
+            searchAreaCombo.setSelectedItem(searchAreas.contains(SearchArea.DOWNLOADED) ? SearchArea.DOWNLOADED : SearchArea.VIEW);
+        }
 
         JSpinner contrastSpinner = new JSpinner(new SpinnerNumberModel(lastContrastThreshold, 0.02, 0.30, 0.01));
         JSpinner shadowSpinner = new JSpinner(new SpinnerNumberModel(lastShadowWeight, 0.00, 0.80, 0.05));
@@ -196,6 +245,8 @@ public class BuildingDetectorAction extends JosmAction {
 
         panel.add(new JLabel(tr("Aktives Luftbild:")));
         panel.add(new JLabel(imageryName + String.format(" (GSD: %.2f m/px)", currentGsd)));
+        panel.add(new JLabel(tr("Suchbereich:")));
+        panel.add(searchAreaCombo);
         panel.add(new JLabel(tr("Canny-Kanten-Schwellenwert (0.04 - 0.15):")));
         panel.add(contrastSpinner);
         panel.add(new JLabel(tr("3D-Schattenwurf-Gewichtung (0.0 - 0.8):")));
@@ -225,6 +276,7 @@ public class BuildingDetectorAction extends JosmAction {
         lastMaxAreaM2 = ((Number) maxAreaSpinner.getValue()).doubleValue();
         lastAlignNeighbors = alignCheck.isSelected();
         lastShowDebug = debugCheck.isSelected();
+        lastSearchArea = (SearchArea) searchAreaCombo.getSelectedItem();
 
         DetectionConfig config = new DetectionConfig();
         config.contrastThreshold = lastContrastThreshold;
@@ -240,7 +292,8 @@ public class BuildingDetectorAction extends JosmAction {
     /**
      * Extrahiert das reine Luftbild auf dem EDT und führt die Detektion asynchron aus.
      */
-    private void performBuildingDetection(ImageryLayer imageryLayer, OsmDataLayer dataLayer, DetectionConfig config) {
+    private void performBuildingDetection(
+            ImageryLayer imageryLayer, OsmDataLayer dataLayer, DetectionConfig config, SearchArea searchArea) {
         // 1. Sauberes Offscreen-Rendering des ImageryLayers ohne OSM-Daten-Overlay.
         //    Die Georeferenzierung wird im selben Schritt eingefroren.
         Capture capture = extractPureImagery(imageryLayer);
@@ -252,22 +305,34 @@ public class BuildingDetectorAction extends JosmAction {
         ImageGeoreference georeference = capture.georeference();
         DataSet dataSet = dataLayer.getDataSet();
 
-        // 2. Flächentreue Bodenauflösung in der Bildmitte (Flächenschwellen in m²)
-        double gsd = georeference.groundResolutionAt(0.5 * aerialImage.getWidth(), 0.5 * aerialImage.getHeight())
-            .getMeanMetersPerPixel();
+        // 2. Suchbereich in ein Pixelfenster (ROI) des gerenderten Bildes umrechnen
+        Rectangle roi = resolveRegionOfInterest(searchArea, dataSet, georeference);
+        if (roi != null && roi.isEmpty()) {
+            showError(tr("Der gewählte Suchbereich liegt außerhalb des sichtbaren Kartenausschnitts."));
+            return;
+        }
+        config.regionOfInterest = roi;
+
+        // Nur vollständig im heruntergeladenen Bereich liegende Gebäude übernehmen
+        Area allowedArea = (searchArea == SearchArea.DOWNLOADED) ? dataSet.getDataSourceArea() : null;
+
+        // 3. Flächentreue Bodenauflösung im Zentrum des Suchbereichs (Flächenschwellen in m²)
+        double centerX = (roi != null) ? roi.getCenterX() : 0.5 * aerialImage.getWidth();
+        double centerY = (roi != null) ? roi.getCenterY() : 0.5 * aerialImage.getHeight();
+        double gsd = georeference.groundResolutionAt(centerX, centerY).getMeanMetersPerPixel();
         if (gsd > 0.0) {
             config.metersPerPixel = gsd;
         }
 
-        // 3. Hintergrund-Thread für rechenintensive Canny-, Schatten- & Nachbarschaftsanalyse
+        // 4. Hintergrund-Thread für rechenintensive Canny-, Schatten- & Nachbarschaftsanalyse
         Thread detectionThread = new Thread(() -> {
             try {
                 List<BuildingContour> detectedBuildings = imageProcessor.detectBuildings(aerialImage, config);
 
-                // 4. Erstellung der OSM-Objekte und UndoRedo-Registrierung zurück auf dem Swing-EDT
+                // 5. Erstellung der OSM-Objekte und UndoRedo-Registrierung zurück auf dem Swing-EDT
                 SwingUtilities.invokeLater(() -> {
                     CreationResult result = buildingCreator.createOSMBuildings(
-                        detectedBuildings, dataSet, georeference, null);
+                        detectedBuildings, dataSet, georeference, allowedArea);
                     MainApplication.getMap().repaint();
 
                     StringBuilder message = new StringBuilder(
@@ -300,6 +365,42 @@ public class BuildingDetectorAction extends JosmAction {
         }, "JOSM-BuildingDetector-Worker");
 
         detectionThread.start();
+    }
+
+    /**
+     * Rechnet den gewählten Suchbereich in ein Pixelfenster des gerenderten Bildes um.
+     *
+     * @return {@code null} für das gesamte Bild, ein leeres Rechteck, wenn der Bereich außerhalb liegt
+     */
+    private static Rectangle resolveRegionOfInterest(SearchArea searchArea, DataSet dataSet, ImageGeoreference georeference) {
+        if (searchArea == null || searchArea == SearchArea.VIEW || dataSet == null) {
+            return null;
+        }
+
+        Rectangle roi = new Rectangle();
+        if (searchArea == SearchArea.DOWNLOADED) {
+            // Vereinigung der Pixelfenster aller heruntergeladenen Rechtecke. Lücken dazwischen werden
+            // später über den exakten heruntergeladenen Bereich ausgeschlossen.
+            for (Bounds bounds : dataSet.getDataSourceBounds()) {
+                Rectangle part = georeference.boundsToPixelRectangle(bounds);
+                if (!part.isEmpty()) {
+                    roi = roi.isEmpty() ? part : roi.union(part);
+                }
+            }
+        } else {
+            BBox selectionBox = new BBox();
+            for (OsmPrimitive primitive : dataSet.getSelected()) {
+                if (!primitive.isIncomplete()) {
+                    selectionBox.add(primitive.getBBox());
+                }
+            }
+            if (selectionBox.isValid()) {
+                roi = georeference.boundsToPixelRectangle(new Bounds(
+                    selectionBox.getMinLat(), selectionBox.getMinLon(),
+                    selectionBox.getMaxLat(), selectionBox.getMaxLon()));
+            }
+        }
+        return roi;
     }
 
     /**
