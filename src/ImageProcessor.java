@@ -156,12 +156,11 @@ public class ImageProcessor {
 					? (double) (g - r) / (g + r) 
 					: 0.0;
 
-				VegetationMask[x][y] =
+				vegetationMask[x][y] =
 					exG > 28 &&
 					ngrdi > 0.06 &&
 					g > 45 &&
 					luminance[x][y] < 210;
-                }
             }
         }
     }
@@ -229,7 +228,7 @@ public class ImageProcessor {
 			for (int x = 2; x < width - 2; x++) {
 				int	sum = 0;
 				for (int k = -2; k <= 2; k++) {
-					sum += src[x + k][y} * kernel[k + 2];
+					sum += src[x + k][y] * kernel[k + 2];
 				}
 				temp[x][y] = sum;
 			}
