@@ -59,6 +59,20 @@ ant clean install
 - **Winkeltreue**: Die Rechteckanpassung erfolgt im Bild und setzt eine lokal winkeltreue Kartenprojektion voraus (Mercator, UTM, Gauß-Krüger, Lambert). Bei nicht winkeltreuen Projektionen wie EPSG:4326 warnt das Plugin vor dem Start.
 - **Grenzen der Lagegenauigkeit**: Die innere Genauigkeit der Umrisse liegt auf synthetischen Testbildern bei wenigen Zehntelpixeln. Die absolute Lage hängt vom Luftbild ab: Ein Bildversatz (in JOSM über den Bildversatz der Ebene korrigierbar) überträgt sich vollständig auf die Gebäude. Erkannt wird außerdem die Dachfläche; bei hohen Gebäuden in nicht lotrecht aufgenommenen Bildern ist das Dach gegenüber dem Grundriss versetzt und muss von Hand an den Gebäudefuß geschoben werden.
 
+## 🧪 Tests
+
+```bash
+ant test                 # Tests ohne Benutzeroberfläche (wenige Sekunden)
+ant test-gui             # End-to-End-Test in einer echten JOSM-Instanz
+xvfb-run ant test-gui    # dasselbe ohne Bildschirm, z. B. auf einem Linux-Server
+```
+
+- **Voraussetzungen**: JDK 21 und Apache Ant. JUnit wird beim ersten Lauf einmalig von Maven Central nach `lib/test/` geladen und über eine SHA-256-Prüfsumme verifiziert.
+- **Testdaten**: Alle Tests arbeiten mit synthetisch erzeugten Luftbildern, deren Gebäudegeometrie exakt bekannt ist (`test/SyntheticScene.java`). Es werden keine fremden Bilddaten benötigt oder mitgeliefert.
+- **`ant test`** prüft die Bildverarbeitung (Erkennung, Suchfenster, Lage- und Größentreue der Umrisse im Subpixelbereich), die Konturgeometrie, die Georeferenzierung (Pixelkonvention, Bodenauflösung gegen die Ellipsoidformeln, Winkeltreue) und die Erzeugung der OSM-Objekte gegen unabhängig gerechnete Sollkoordinaten.
+- **`ant test-gui`** startet JOSM offline mit einem temporären Profil unter `build-test/` (das eigene JOSM-Profil bleibt unberührt), blendet ein synthetisches Luftbild ein und bedient die Action samt Dialogen: Suchbereiche, Verschieben der Karte während der Berechnung, Duplikatvermeidung, Rückgängig und die Warnung bei nicht winkeltreuer Projektion. Ohne grafische Oberfläche wird der Test übersprungen.
+- Die Tests übersetzen in ein eigenes Verzeichnis `build-test/`; `build/` und `dist/` werden nicht verändert.
+
 ## 🤝 Mitwirken & Lizenz
 
 Dieses Plugin steht unter der **GPL-3.0 Lizenz**. Pull Requests, Bug Reports und Feedback sind in der OSM-Community jederzeit willkommen!
