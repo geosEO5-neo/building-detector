@@ -1,0 +1,32 @@
+name: Tests
+
+# Führt bei jedem Push und Pull Request die Tests ohne Benutzeroberfläche aus (ant test).
+# Der End-to-End-Test in JOSM (ant test-gui) läuft bewusst nicht automatisch.
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: ant test
+    # Feste Runner-Version: Apache Ant ist auf diesem Image vorinstalliert.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Tests ausführen
+        run: ant test
