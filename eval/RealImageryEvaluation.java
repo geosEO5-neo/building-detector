@@ -157,6 +157,8 @@ public final class RealImageryEvaluation {
         String tileUrl = opt.getOrDefault("tile-url", DEFAULT_TILE_URL);
         String attribution = opt.getOrDefault("attribution", DEFAULT_ATTRIBUTION);
         double iouThreshold = Double.parseDouble(opt.getOrDefault("iou", "0.5"));
+        // Feste Mindestfläche der Referenz: unabhängig von den Parametern der Erkennung, damit Läufe vergleichbar bleiben.
+        double minReferenceAreaM2 = Double.parseDouble(opt.getOrDefault("min-ref-area", "12"));
         Set<String> only = new HashSet<>();
         if (opt.containsKey("only")) {
             for (String s : opt.get("only").split(",")) {
@@ -166,6 +168,7 @@ public final class RealImageryEvaluation {
 
         ImageProcessor.DetectionConfig defaults = new ImageProcessor.DetectionConfig();
         double contrast = Double.parseDouble(opt.getOrDefault("contrast", String.valueOf(defaults.contrastThreshold)));
+        double minArea = Double.parseDouble(opt.getOrDefault("min-area", String.valueOf(defaults.minBuildingAreaM2)));
 
         Files.createDirectories(outDir);
         HttpClient http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(20)).build();
@@ -183,7 +186,7 @@ public final class RealImageryEvaluation {
                 }
                 BufferedImage image = loadMosaic(http, scene, tileUrl, cacheDir);
                 List<Shape> reference = loadReference(http, scene, cacheDir);
-                SceneResult r = evaluate(scene, image, reference, contrast, iouThreshold, buildings, dets,
+                SceneResult r = evaluate(scene, image, reference, contrast, minArea, iouThreshold, minReferenceAreaM2, buildings, dets,
                     outDir.resolve(scene.name() + ".png"), attribution);
                 results.add(r);
             }
@@ -372,13 +375,15 @@ public final class RealImageryEvaluation {
     // ---------------------------------------------------------------------------------------------
 
     private static SceneResult evaluate(Scene scene, BufferedImage image, List<Shape> reference, double contrast,
-            double iouThreshold, PrintWriter buildings, PrintWriter dets, Path overlayFile, String attribution)
+            double minArea, double iouThreshold, double minReferenceAreaM2, PrintWriter buildings, PrintWriter dets, Path overlayFile,
+            String attribution)
             throws IOException {
         double[] mpp = scene.metersPerPixel();
         double pixelAreaM2 = mpp[0] * mpp[1];
 
         ImageProcessor.DetectionConfig config = new ImageProcessor.DetectionConfig();
         config.contrastThreshold = contrast;
+        config.minBuildingAreaM2 = minArea;
         config.metersPerPixel = Math.sqrt(pixelAreaM2); // flächentreue mittlere Auflösung, wie im Plugin
 
         long t0 = System.nanoTime();
@@ -403,11 +408,11 @@ public final class RealImageryEvaluation {
         Rectangle2D frame = new Rectangle2D.Double(FRAME_MARGIN_PX, FRAME_MARGIN_PX,
             scene.width() - 2 * FRAME_MARGIN_PX, scene.height() - 2 * FRAME_MARGIN_PX);
 
-        // Auswertbar sind nur Referenzgebäude, die vollständig im Bild liegen und die Mindestfläche erreichen.
+        // Auswertbar sind nur Referenzgebäude, die vollständig im Bild liegen und die feste Mindestfläche erreichen.
         boolean[] evaluable = new boolean[reference.size()];
         for (int j = 0; j < reference.size(); j++) {
             Shape ref = reference.get(j);
-            evaluable[j] = ref.inside(frame) && ref.areaPx * pixelAreaM2 >= config.minBuildingAreaM2;
+            evaluable[j] = ref.inside(frame) && ref.areaPx * pixelAreaM2 >= minReferenceAreaM2;
         }
 
         // Paarweise IoU, danach gierige Eins-zu-eins-Zuordnung in absteigender Reihenfolge.
