@@ -2,6 +2,7 @@ package org.openstreetmap.josm.plugins.buildingdetector;
 
 import java.awt.Color;
 import java.awt.Rectangle;
+import java.awt.geom.Point2D;
 import java.awt.image.BufferedImage;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
@@ -666,11 +667,11 @@ public class ImageProcessor {
             {bestMinU, bestMaxV}
         };
 
-        List<Point> corners = new ArrayList<>(4);
+        // Eckpunkte subpixelgenau belassen: Runden auf ganze Pixel würde die Rechtwinkligkeit zerstören
+        // und die Orientierung kurzer Gebäudeseiten um bis zu ca. 1° verfälschen.
+        List<Point2D.Double> corners = new ArrayList<>(4);
         for (double[] uv : uvCorners) {
-            int x = (int) Math.round(uv[0] * cos - uv[1] * sin);
-            int y = (int) Math.round(uv[0] * sin + uv[1] * cos);
-            corners.add(new Point(x, y));
+            corners.add(new Point2D.Double(uv[0] * cos - uv[1] * sin, uv[0] * sin + uv[1] * cos));
         }
 
         // Hauptorientierung der längeren Gebäudeseite zuweisen
@@ -678,7 +679,7 @@ public class ImageProcessor {
         double lenV = bestMaxV - bestMinV;
         double dominantAngle = (lenU >= lenV) ? bestAngle : (bestAngle + Math.PI / 2.0);
 
-        return new BuildingContour(corners, boundaryPoints, dominantAngle, rectangularity);
+        return BuildingContour.fromExactCorners(corners, boundaryPoints, dominantAngle, rectangularity);
     }
 
     /**
