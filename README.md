@@ -77,6 +77,23 @@ xvfb-run ant test-gui    # dasselbe ohne Bildschirm, z. B. auf einem Linux-Serve
 - Die Tests übersetzen in ein eigenes Verzeichnis `build-test/`; `build/` und `dist/` werden nicht verändert.
 - **Automatisch auf GitHub**: Bei jedem Push und Pull Request führt GitHub Actions `ant test` aus (`.github/workflows/tests.yml`). Der GUI-Test läuft dort nicht.
 
+## 📏 Messung an echten Luftbildern
+
+```bash
+ant eval-real                                          # alle Szenen aus eval/scenes.csv
+ant eval-real -Deval.args="--only=wien-siedlung"       # einzelne Szenen (kommagetrennt)
+ant eval-real -Deval.args="--iou=0.3"                  # andere Trefferschwelle
+```
+
+Die synthetischen Tests zeigen, ob die Geometrie stimmt. Ob die Erkennung auf echten Bildern überhaupt Gebäude findet, misst `ant eval-real` (`eval/RealImageryEvaluation.java`):
+
+- **Ablauf**: Für jede Szene wird ein Mosaik aus Orthofoto-Kacheln geladen, die Erkennung mit den Standardparametern ausgeführt und das Ergebnis mit den Gebäuden verglichen, die in OpenStreetMap im selben Ausschnitt vorhanden sind. Eine Erkennung gilt als Treffer, wenn sie sich mit genau einem OSM-Gebäude zu mehr als 50 % überdeckt (IoU > 0,5, Eins-zu-eins-Zuordnung).
+- **Szenen**: `eval/scenes.csv` trennt Szenen, an denen die Erkennung eingestellt wurde (`tuning`), von Kontrollszenen (`holdout`), an denen nichts eingestellt wird. Nur die Kontrollszenen sagen etwas darüber aus, wie gut die Erkennung auf unbekannten Bildern arbeitet.
+- **Ergebnisse** unter `build-eval/results/`: `summary.csv` (je Szene und gesamt: Präzision und Trefferquote mit 95-%-Wilson-Intervall, F1, Lageabweichungen), `buildings.csv` (je OSM-Gebäude: Treffer oder nicht; bei Treffern Schwerpunktversatz nach Ost und Nord in Metern, Flächen, Richtungsabweichung, Abstand der Umrisse), `detections.csv` (je Erkennung) und ein Überlagerungsbild je Szene.
+- **Daten**: Orthofotos von [basemap.at](https://basemap.at) (CC BY 4.0), Gebäude © [OpenStreetMap](https://www.openstreetmap.org/copyright)-Mitwirkende (ODbL). Beides wird nur unter `build-eval/cache/` zwischengespeichert und nicht mit dem Plugin verteilt. Eine andere Kachelquelle lässt sich mit `--tile-url=…{z}/{x}/{y}…` und `--attribution=…` angeben; bitte die Nutzungsbedingungen der Quelle beachten.
+- **Grenzen der Aussage**: OSM ist keine fehlerfreie Referenz, und ein Orthofoto zeigt Dächer, die gegenüber dem Grundriss durch Dachüberstand und Umklappung versetzt sind. Die Lageabweichungen enthalten deshalb Anteile der Referenz und des Bildes. Die OSM-Daten werden beim ersten Lauf geladen; wer später neu lädt, misst gegen einen anderen OSM-Stand.
+- Die Messung braucht Netzzugang und ist deshalb nicht Teil von `ant test`.
+
 ## 🤝 Mitwirken & Lizenz
 
 Dieses Plugin ist freie Software unter der **GNU General Public License, Version 2 oder (nach eigener Wahl) jeder späteren Version** (`GPL-2.0-or-later`) – derselben Lizenz wie JOSM selbst. Der vollständige Lizenztext steht in der Datei [LICENSE](LICENSE). Copyright (C) 2026 Sero.

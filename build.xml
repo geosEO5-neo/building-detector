@@ -23,6 +23,12 @@
     <property name="junit.jar" location="${test.lib.dir}/junit-platform-console-standalone-${junit.version}.jar"/>
     <property name="junit.url" value="https://repo1.maven.org/maven2/org/junit/platform/junit-platform-console-standalone/${junit.version}/junit-platform-console-standalone-${junit.version}.jar"/>
 
+    <!-- Messung an echten Luftbildern (benötigt Netzzugang, nicht Teil der automatischen Tests). -->
+    <property name="eval.dir" location="eval"/>
+    <property name="eval.build.dir" location="build-eval"/>
+    <property name="eval.args" value=""/>
+    <property name="eval.jvmargs" value=""/>
+
     <target name="init">
         <mkdir dir="${plugin.build.dir}"/>
         <mkdir dir="${plugin.dist.dir}"/>
@@ -71,6 +77,7 @@
         <delete dir="${plugin.build.dir}"/>
         <delete dir="${plugin.dist.dir}"/>
         <delete dir="${test.build.dir}"/>
+        <delete dir="${eval.build.dir}"/>
     </target>
 
     <target name="test-deps">
@@ -143,6 +150,36 @@
             <arg value="--disable-ansi-colors"/>
             <arg value="--details=tree"/>
             <arg value="--details-theme=ascii"/>
+        </java>
+    </target>
+
+    <!--
+        Vergleicht die Erkennung auf echten Orthofotos mit vorhandenen OSM-Gebäuden (Szenen: eval/scenes.csv).
+        Lädt Bildkacheln und OSM-Daten einmalig nach build-eval/cache und schreibt Tabellen und
+        Überlagerungsbilder nach build-eval/results.
+        Einzelne Szenen oder eine andere Trefferschwelle lassen sich über die Eigenschaft eval.args wählen
+        (Argumente "only" und "iou", siehe README).
+    -->
+    <target name="eval-real" description="Misst die Erkennung an echten Luftbildern gegen OSM-Gebäude (benötigt Netzzugang)">
+        <mkdir dir="${eval.build.dir}/classes"/>
+        <javac destdir="${eval.build.dir}/classes" release="21" debug="true" includeantruntime="false" encoding="UTF-8">
+            <src path="${src.dir}"/>
+            <src path="${eval.dir}"/>
+            <classpath>
+                <fileset dir="${lib.dir}" includes="*.jar"/>
+            </classpath>
+        </javac>
+        <java classname="org.openstreetmap.josm.plugins.buildingdetector.RealImageryEvaluation" fork="true" failonerror="true">
+            <classpath>
+                <pathelement location="${eval.build.dir}/classes"/>
+                <fileset dir="${lib.dir}" includes="*.jar"/>
+            </classpath>
+            <jvmarg value="-Djava.awt.headless=true"/>
+            <jvmarg line="${eval.jvmargs}"/>
+            <arg value="--scenes=${eval.dir}/scenes.csv"/>
+            <arg value="--out=${eval.build.dir}/results"/>
+            <arg value="--cache=${eval.build.dir}/cache"/>
+            <arg line="${eval.args}"/>
         </java>
     </target>
 

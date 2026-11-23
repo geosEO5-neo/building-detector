@@ -1,3 +1,6 @@
 # Testartefakte (ant test / ant test-gui)
 /build-test/
 /lib/test/
+
+# Messung an echten Luftbildern (ant eval-real): Zwischenspeicher und Ergebnisse
+/build-eval/
