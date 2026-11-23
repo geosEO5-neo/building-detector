@@ -136,22 +136,31 @@ public class ImageProcessor {
     private void extractSpectralChannels(BufferedImage img, int[][] luminance, boolean[][] vegetationMask) {
         int width = img.getWidth();
         int height = img.getHeight();
+		int[] pixels = img.getRGB(0, 0, width, height, null, 0, width);
 
-        for (int x = 0; x < width; x++) {
-            for (int y = 0; y < height; y++) {
-                int rgb = img.getRGB(x, y);
+        for (int i = 0, y = 0; y < height; y++) {
+            for (int x = 0; x < width; x++, i++) {
+                int rgb = pixels[i];
+				
                 int r = (rgb >> 16) & 0xFF;
                 int g = (rgb >> 8) & 0xFF;
                 int b = rgb & 0xFF;
-
-                int lum = (int) Math.round(0.299 * r + 0.587 * g + 0.114 * b);
-                luminance[x][y] = lum;
+				
+                luminance[x][y] = (int) Math.round(
+					0.299 * r + 0.587 * g + 0.114 * b
+				);
 
                 // Excess Green Index (ExG) + Normalized Green-Red Difference (NGRDI)
                 int exG = 2 * g - r - b;
-                double ngrdi = (g + r > 15) ? (double) (g - r) / (g + r) : 0.0;
-                if (exG > 28 && ngrdi > 0.06 && g > 45 && lum < 210) {
-                    vegetationMask[x][y] = true;
+                double ngrdi = (g + r > 15) 
+					? (double) (g - r) / (g + r) 
+					: 0.0;
+
+				VegetationMask[x][y] =
+					exG > 28 &&
+					ngrdi > 0.06 &&
+					g > 45 &&
+					luminance[x][y] < 210;
                 }
             }
         }
