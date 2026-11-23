@@ -45,6 +45,7 @@ class BuildingCreatorTest {
         scene = SyntheticScene.randomGrid(5, 4, 5, 120, 225, true);
         DetectionConfig config = new DetectionConfig();
         config.metersPerPixel = 0.30;
+        config.minBuildingAreaM2 = SyntheticScene.MIN_BUILDING_AREA_M2;
         config.alignWithNeighbors = false;
         detected = new ImageProcessor().detectBuildings(scene.image, config);
     }

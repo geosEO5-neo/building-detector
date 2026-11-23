@@ -1,0 +1,13 @@
+# Testszenen für "ant eval-real".
+# role: "tuning" = an diesen Szenen wurde die Erkennung entwickelt und eingestellt;
+#       "holdout" = nur zur Kontrolle, an diesen Szenen wird nichts eingestellt.
+# Der Ausschnitt ist ein Mosaik aus tilesX x tilesY Web-Mercator-Kacheln um den Mittelpunkt.
+name;role;lat;lon;zoom;tilesX;tilesY;description
+wien-essling;tuning;48.2138;16.5235;19;8;6;Ortskern mit Wohnblöcken und Reihenhäusern
+raasdorf;tuning;48.2462;16.5655;19;8;6;Dorf mit Höfen und Gewerbehallen
+wien-siedlung;tuning;48.2010;16.5440;19;8;6;Einfamilienhaussiedlung
+voels;holdout;47.2535;11.3275;19;8;6;Einfamilienhäuser am Hang (Tirol)
+graz-andritz;holdout;47.1065;15.4215;19;8;6;Gemischt: Gewerbe, Wohnblöcke, Einfamilienhäuser (Steiermark)
+illmitz;holdout;47.7625;16.8005;19;8;6;Dichtes Straßendorf mit Streckhöfen (Burgenland)
+wals;holdout;47.7885;12.9735;19;8;6;Wohn- und Gewerbegebiet (Salzburg)
+viktring;holdout;46.5915;14.2745;19;8;6;Wohnblöcke, Markt und Einfamilienhäuser (Kärnten)

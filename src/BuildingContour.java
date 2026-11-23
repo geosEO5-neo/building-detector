@@ -309,19 +309,64 @@ public class BuildingContour {
     }
 
     /**
-     * Berechnet die Schnittfläche über Vereinigungsfläche (IoU) der Bounding-Boxen
-     * bzw. prüft auf starke räumliche Überlappung zweier Gebäudekonturen.
+     * Anteil der kleineren der beiden Konturen, der von der anderen überdeckt wird (0 = getrennt,
+     * 1 = die kleinere liegt vollständig in der größeren).
+     *
+     * Die Schnittfläche wird exakt aus den Eckpunkten berechnet (Clipping konvexer Polygone). Ein Vergleich
+     * der achsparallelen Hüllrechtecke würde schräg stehende Nachbargebäude fälschlich als überlappend werten.
      */
     public double computeOverlapRatio(BuildingContour other) {
-        Rectangle r1 = this.getBoundingBox();
-        Rectangle r2 = other.getBoundingBox();
-        if (!r1.intersects(r2)) {
+        if (corners == null || other.corners == null || corners.size() < 3 || other.corners.size() < 3) {
             return 0.0;
         }
-        Rectangle inter = r1.intersection(r2);
-        double interArea = (double) inter.width * inter.height;
-        double minArea = Math.max(1.0, Math.min(this.getExactArea(), other.getExactArea()));
-        return interArea / minArea;
+        if (!this.getBoundingBox().intersects(other.getBoundingBox())) {
+            return 0.0;
+        }
+        double minArea = Math.min(this.getExactArea(), other.getExactArea());
+        if (minArea <= 0.0) {
+            return 0.0;
+        }
+        return Math.min(1.0, convexIntersectionArea(this.corners, other.corners) / minArea);
+    }
+
+    /** Schnittfläche zweier konvexer Polygone (Sutherland-Hodgman), unabhängig vom Umlaufsinn. */
+    static double convexIntersectionArea(List<Point2D.Double> subject, List<Point2D.Double> clip) {
+        List<Point2D.Double> output = new ArrayList<>(subject);
+        double orientation = Math.signum(signedArea(clip));
+        if (orientation == 0.0) {
+            return 0.0;
+        }
+        int n = clip.size();
+        for (int i = 0; i < n && !output.isEmpty(); i++) {
+            Point2D.Double a = clip.get(i);
+            Point2D.Double b = clip.get((i + 1) % n);
+            List<Point2D.Double> input = output;
+            output = new ArrayList<>(input.size() + 2);
+            for (int k = 0; k < input.size(); k++) {
+                Point2D.Double p = input.get(k);
+                Point2D.Double q = input.get((k + 1) % input.size());
+                double sideP = orientation * ((b.x - a.x) * (p.y - a.y) - (b.y - a.y) * (p.x - a.x));
+                double sideQ = orientation * ((b.x - a.x) * (q.y - a.y) - (b.y - a.y) * (q.x - a.x));
+                if (sideP >= 0) {
+                    output.add(p);
+                }
+                if ((sideP > 0 && sideQ < 0) || (sideP < 0 && sideQ > 0)) {
+                    double t = sideP / (sideP - sideQ);
+                    output.add(new Point2D.Double(p.x + t * (q.x - p.x), p.y + t * (q.y - p.y)));
+                }
+            }
+        }
+        return output.size() < 3 ? 0.0 : Math.abs(signedArea(output));
+    }
+
+    private static double signedArea(List<Point2D.Double> polygon) {
+        double sum = 0.0;
+        for (int i = 0; i < polygon.size(); i++) {
+            Point2D.Double p = polygon.get(i);
+            Point2D.Double q = polygon.get((i + 1) % polygon.size());
+            sum += p.x * q.y - q.x * p.y;
+        }
+        return 0.5 * sum;
     }
 
     public Polygon toAwtPolygon() {
