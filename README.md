@@ -1,7 +1,7 @@
 # HOT Semi-Auto Building Detector (JOSM Plugin)
 
 > [!WARNING]
-> **Status: experimentell.** Die Erkennung ist bisher nur mit synthetisch erzeugten Testbildern geprüft und **nicht an echten Luftbildern validiert**. Jedes erzeugte Gebäude muss vor dem Hochladen von Hand mit dem Luftbild verglichen und bei Bedarf korrigiert oder gelöscht werden. Bitte keine ungeprüften Ergebnisse nach OpenStreetMap hochladen.
+> **Status: experimentell.** Die automatischen Tests arbeiten nur mit synthetisch erzeugten Bildern. Ein erster Vergleich an echten Orthofotos (basemap.at, drei Gebiete im Osten Wiens und Umgebung, 0,2–0,4 m/px, Referenz: vorhandene OSM-Gebäude, Treffer ab IoU > 0,5) ergab im November 2026 nur etwa **6–7 % Präzision und 11–14 % Trefferquote**; 40–51 % der Erkennungen lagen auf gar keinem Gebäude. Die Erkennung ist damit **für den praktischen Einsatz noch nicht brauchbar**. Jedes erzeugte Gebäude muss vor dem Hochladen von Hand mit dem Luftbild verglichen und bei Bedarf korrigiert oder gelöscht werden. Bitte keine ungeprüften Ergebnisse nach OpenStreetMap hochladen.
 
 Ein spezialisiertes JOSM-Plugin für die semi-automatische Erfassung von Gebäuden aus Luftbildern, optimiert für Aufgaben im **HOT Tasking Manager**. 
 
