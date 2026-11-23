@@ -7,6 +7,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.awt.Color;
 import java.awt.Rectangle;
 import java.awt.geom.Area;
 import java.awt.geom.Path2D;
@@ -23,6 +24,7 @@ class ImageProcessorTest {
 
     private static List<BuildingContour> detect(BufferedImage image, Rectangle roi) {
         DetectionConfig config = new DetectionConfig();
+        config.minBuildingAreaM2 = SyntheticScene.MIN_BUILDING_AREA_M2;
         config.regionOfInterest = roi;
         return new ImageProcessor().detectBuildings(image, config);
     }
@@ -121,6 +123,7 @@ class ImageProcessorTest {
             for (long seed = 11; seed <= 12; seed++) {
                 SyntheticScene scene = SyntheticScene.randomGrid(5, 4, seed, 120, 225, shadows);
                 DetectionConfig config = new DetectionConfig();
+                config.minBuildingAreaM2 = SyntheticScene.MIN_BUILDING_AREA_M2;
                 config.alignWithNeighbors = false;
                 List<BuildingContour> detected = new ImageProcessor().detectBuildings(scene.image, config);
                 for (double[][] building : scene.truth) {
@@ -191,6 +194,117 @@ class ImageProcessorTest {
                 }
             }
         }
+    }
+
+    /** Dachfarbe mit gleichem Farbton, aber anderer Helligkeit (Sonnen- und Schattenseite desselben Dachs). */
+    private static Color shade(double factor) {
+        return new Color((int) Math.round(210 * factor), (int) Math.round(128 * factor), (int) Math.round(98 * factor));
+    }
+
+    /** Ein Gebäude 80 x 50 px, gedreht, dessen Dach entlang des Firsts in Teilflächen zerfällt. */
+    private static SyntheticScene roofScene(double[][][] localFaces, Color[] colors) {
+        double cx = 150, cy = 120, angle = 20;
+        List<double[][]> truth = new ArrayList<>();
+        truth.add(SyntheticScene.rectangle(cx, cy, 80, 50, angle));
+        List<double[][]> faces = new ArrayList<>();
+        List<Color> faceColors = new ArrayList<>(List.of(colors));
+        for (double[][] face : localFaces) {
+            faces.add(SyntheticScene.place(cx, cy, angle, face));
+        }
+        // Eine wirklich dunkle Fläche abseits des Gebäudes (Baumschatten). Ohne sie wäre die Schattenseite des
+        // Dachs das Dunkelste im Bild, und die Kontrastspreizung würde sie zum Schatten erklären.
+        faces.add(SyntheticScene.rectangle(60, 200, 70, 40, 0));
+        faceColors.add(new Color(25, 25, 30));
+        // Heller Untergrund (Kies, Beton), damit sich jede Dachseite vom Boden abhebt
+        return SyntheticScene.renderFaces(truth, faces, faceColors, 300, 240, 200, 7, true);
+    }
+
+    private static final double[][][] GABLE_FACES = {
+        {{-40, -25}, {40, -25}, {40, 0}, {-40, 0}},
+        {{-40, 0}, {40, 0}, {40, 25}, {-40, 25}}};
+
+    /**
+     * Walmdach mit kurzem First: Ein Giebeldreieck und eine Hauptfläche allein füllen ihr Hüllrechteck nur
+     * zur Hälfte. Die Dreiecke können deshalb erst dazukommen, nachdem die beiden Hauptflächen vereint sind.
+     */
+    private static final double[][][] HIP_FACES = {
+        {{-40, -25}, {40, -25}, {10, 0}, {-10, 0}},
+        {{-40, 25}, {40, 25}, {10, 0}, {-10, 0}},
+        {{-40, -25}, {-40, 25}, {-10, 0}},
+        {{40, -25}, {40, 25}, {10, 0}}};
+
+    private static void assertWholeRoof(SyntheticScene scene, String what) {
+        List<BuildingContour> detected = detect(scene.image, null);
+        assertEquals(1, detected.size(), what + ": genau ein Gebäude statt einzelner Dachflächen");
+        double[][] outline = SyntheticScene.toContinuous(detected.get(0));
+        double[] sides = SyntheticScene.sideLengths(outline);
+        assertEquals(80.0, sides[0], 1.5, what + ": Länge des ganzen Dachs");
+        assertEquals(50.0, sides[1], 1.5, what + ": Breite des ganzen Dachs");
+        double[] centre = SyntheticScene.centroid(outline);
+        double[] expected = SyntheticScene.centroid(scene.truth.get(0));
+        assertEquals(expected[0], centre[0], 1.0, what + ": Lage x");
+        assertEquals(expected[1], centre[1], 1.0, what + ": Lage y");
+        assertTrue(detected.get(0).getRectangularity() > 0.85,
+            what + ": alle Dachflächen gehören zum Gebäude, Rechteckigkeit " + detected.get(0).getRectangularity());
+    }
+
+    @Test
+    void sunlitAndShadedFaceOfAGableRoofFormOneBuilding() {
+        assertWholeRoof(roofScene(GABLE_FACES, new Color[] {shade(1.0), shade(0.6)}), "Satteldach");
+    }
+
+    @Test
+    void fourFacesOfAHipRoofFormOneBuilding() {
+        assertWholeRoof(roofScene(HIP_FACES, new Color[] {shade(1.0), shade(0.6), shade(0.85), shade(0.72)}), "Walmdach");
+    }
+
+    /** Gegenprobe: Flächen mit deutlich anderem Farbton gehören nicht zum selben Dach. */
+    @Test
+    void adjacentRoofsOfDifferentColourStaySeparate() {
+        SyntheticScene scene = roofScene(GABLE_FACES, new Color[] {shade(1.0), new Color(70, 90, 150)});
+        List<BuildingContour> detected = detect(scene.image, null);
+        assertEquals(2, detected.size(), "zwei verschiedenfarbige Flächen bleiben zwei Objekte");
+        for (BuildingContour contour : detected) {
+            double[] sides = SyntheticScene.sideLengths(SyntheticScene.toContinuous(contour));
+            assertEquals(80.0, sides[0], 1.5);
+            assertEquals(25.0, sides[1], 1.5);
+        }
+    }
+
+    /** Bei Überlappung bleibt das größere Objekt: Ein Aufbau auf dem Dach verdrängt nicht das Gebäude. */
+    @Test
+    void objectOnTheRoofDoesNotReplaceTheBuilding() {
+        List<double[][]> truth = new ArrayList<>();
+        truth.add(SyntheticScene.rectangle(150, 120, 90, 64, 15));
+        List<double[][]> faces = new ArrayList<>(truth);
+        faces.add(SyntheticScene.rectangle(150, 120, 34, 22, 15)); // z. B. Solaranlage, 47 m² bei 0,25 m/px
+        List<Color> colors = List.of(new Color(225, 220, 213), new Color(120, 130, 170));
+        SyntheticScene scene = SyntheticScene.renderFaces(truth, faces, colors, 300, 240, 120, 9, true);
+
+        List<BuildingContour> detected = detect(scene.image, null);
+        assertEquals(1, detected.size());
+        double[] sides = SyntheticScene.sideLengths(SyntheticScene.toContinuous(detected.get(0)));
+        assertEquals(90.0, sides[0], 1.5);
+        assertEquals(64.0, sides[1], 1.5);
+    }
+
+    @Test
+    void defaultMinimumAreaAndAspectRatioRejectImplausibleObjects() {
+        List<double[][]> truth = new ArrayList<>();
+        truth.add(SyntheticScene.rectangle(90, 80, 40, 30, 0));    // 75 m² bei 0,25 m/px: unter dem Standardwert
+        truth.add(SyntheticScene.rectangle(250, 80, 60, 40, 0));   // 150 m²: plausibles Gebäude
+        truth.add(SyntheticScene.rectangle(200, 200, 200, 30, 0)); // 375 m², aber Seitenverhältnis 6,7: Streifen
+        SyntheticScene scene = SyntheticScene.render(truth, 420, 280, 120, 225, 3, false);
+
+        List<BuildingContour> withDefaults = new ImageProcessor().detectBuildings(scene.image, new DetectionConfig());
+        assertEquals(1, withDefaults.size(), "nur das plausible Gebäude");
+        assertNotNull(SyntheticScene.nearest(withDefaults, truth.get(1), 3.0));
+
+        // Die Mindestfläche bleibt einstellbar: mit kleinerem Wert kommt das kleine Gebäude hinzu
+        List<BuildingContour> smallAllowed = detect(scene.image, null);
+        assertEquals(2, smallAllowed.size());
+        assertNotNull(SyntheticScene.nearest(smallAllowed, truth.get(0), 3.0));
+        assertEquals(DetectionConfig.DEFAULT_MIN_BUILDING_AREA_M2, new DetectionConfig().minBuildingAreaM2);
     }
 
     private static Area toArea(BuildingContour contour) {

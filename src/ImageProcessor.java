@@ -12,7 +12,9 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.Deque;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import javax.swing.ImageIcon;
 import javax.swing.JFrame;
 import javax.swing.JLabel;
@@ -35,8 +37,14 @@ public class ImageProcessor {
      * Konfigurationsparameter für den Fernerkundungs-Workflow.
      */
     public static class DetectionConfig {
+        /**
+         * Standardwert der Mindestfläche. Auf echten Orthofotos (0,2 m/px) waren Erkennungen unter 80 m²
+         * zu rund 96 % falsch (siehe "ant eval-real"); kleinere Werte sind möglich, liefern aber viele Fehltreffer.
+         */
+        public static final double DEFAULT_MIN_BUILDING_AREA_M2 = 80.0;
+
         public double contrastThreshold = 0.08;   // Empfindlichkeit für Canny-Kanten (0.03 - 0.20)
-        public double minBuildingAreaM2 = 12.0;   // Minimale Gebäudefläche in m² (für HOT Hütten/Häuser)
+        public double minBuildingAreaM2 = DEFAULT_MIN_BUILDING_AREA_M2;   // Minimale Gebäudefläche in m² (im Dialog einstellbar)
         public double maxBuildingAreaM2 = 2500.0; // Maximale Gebäudefläche in m²
         public double metersPerPixel = 0.25;      // Bodenauflösung (GSD), wird dynamisch aus MapView gesetzt
         public double shadowWeight = 0.35;        // Gewicht des Schattenwurfs bei der 3D-Prüfung [0..1]
@@ -88,7 +96,7 @@ public class ImageProcessor {
             // 1. Spektrale Zerlegung: Luminanz, Vegetationsmaske (ExG) und Schattenmaske extrahieren
             int[][] luminance = new int[width][height];
             boolean[][] vegetationMask = new boolean[width][height];
-            extractSpectralChannels(aerialImage, roi, luminance, vegetationMask);
+            int[] rgb = extractSpectralChannels(aerialImage, roi, luminance, vegetationMask);
 
             // 2. Robuste Perzentil-Kontrastspreizung (2% - 98%) & 5x5 Gauß-Glättung
             int[][] enhanced = stretchContrastPercentile(luminance, width, height, 0.02, 0.98);
@@ -119,8 +127,8 @@ public class ImageProcessor {
             //    a) Von Kanten umschlossene homogene Dachflächen
             //    b) Lokale adaptive Dach-Segmentierung (helle/farbhomogene Nicht-Vegetations-Objekte)
             List<BuildingContour> candidates = extractRoofCandidates(
-                smoothed, closedEdges, vegetationMask, shadowMask, gradMag,
-                width, height, minAreaPx, maxAreaPx, cannyLowThreshold(config.contrastThreshold)
+                rgb, smoothed, closedEdges, vegetationMask, shadowMask, gradMag,
+                width, height, minAreaPx, maxAreaPx, cannyLowThreshold(config.contrastThreshold), gsd
             );
 
             // 8. Schattenwurf-Bewertung (3D-Verifikation entlang des geschätzten Schattenvektors)
@@ -159,7 +167,7 @@ public class ImageProcessor {
      * sowie hoher Grün-Sättigung. Gelesen wird nur der Ausschnitt {@code roi}; die Ergebnis-Arrays
      * sind ROI-lokal indiziert.
      */
-    private void extractSpectralChannels(BufferedImage img, Rectangle roi, int[][] luminance, boolean[][] vegetationMask) {
+    private int[] extractSpectralChannels(BufferedImage img, Rectangle roi, int[][] luminance, boolean[][] vegetationMask) {
         int width = roi.width;
         int height = roi.height;
 		int[] pixels = img.getRGB(roi.x, roi.y, width, height, null, 0, width);
@@ -189,6 +197,7 @@ public class ImageProcessor {
 					luminance[x][y] < 210;
             }
         }
+        return pixels;
     }
 
     /**
@@ -494,16 +503,73 @@ public class ImageProcessor {
         return new double[]{sumX / norm, sumY / norm};
     }
 
+    /** Kleinste Teilfläche (m²), die beim Zusammenfassen von Dachflächen berücksichtigt wird. */
+    private static final double MIN_SEGMENT_AREA_M2 = 2.0;
+    /** Größte Breite (m) einer Trennlinie (First, Grat, Kehle), über die hinweg Dachflächen als benachbart gelten. */
+    private static final double MAX_RIDGE_WIDTH_M = 0.8;
+    /** Größter Abstand der mittleren Farbanteile r/(r+g+b), g/(r+g+b) zweier Flächen desselben Dachs. */
+    private static final double MAX_CHROMA_DISTANCE = 0.030;
+    /** Größtes Helligkeitsverhältnis zwischen besonnter und beschatteter Fläche desselben Dachs. */
+    private static final double MAX_LUMINANCE_RATIO = 3.0;
+    /** Mindest-Rechteckigkeit, die eine zusammengefasste Fläche behalten muss. */
+    private static final double MIN_MERGED_RECTANGULARITY = 0.56;
+
+    /** Zusammenhängende, homogene Teilfläche (z. B. eine Dachseite) aus dem Region-Growing. */
+    private static final class RoofSegment {
+        int area;
+        long sumR;
+        long sumG;
+        long sumB;
+        double edgeStrengthSum;
+        int edgeHitCount;
+        List<Point> boundary = new ArrayList<>();
+        /** Kennung der Gruppe, zu der die Teilfläche nach dem Zusammenfassen gehört. */
+        int group;
+
+        double chromaR() {
+            return (double) sumR / Math.max(1L, sumR + sumG + sumB);
+        }
+
+        double chromaG() {
+            return (double) sumG / Math.max(1L, sumR + sumG + sumB);
+        }
+
+        double meanLuminance() {
+            return (0.299 * sumR + 0.587 * sumG + 0.114 * sumB) / Math.max(1, area);
+        }
+
+        void absorb(RoofSegment other) {
+            area += other.area;
+            sumR += other.sumR;
+            sumG += other.sumG;
+            sumB += other.sumB;
+            edgeStrengthSum += other.edgeStrengthSum;
+            edgeHitCount += other.edgeHitCount;
+            boundary.addAll(other.boundary);
+        }
+    }
+
     /**
-     * Extrahiert homogene Dachregionen, die von Kanten begrenzt werden, und bildet deren
-     * orientierte Minimum Bounding Box (OMBB) mittels Rotating Calipers.
+     * Extrahiert Dachkandidaten in drei Schritten:
+     * <ol>
+     *   <li>Region-Growing: homogene Teilflächen, begrenzt von Kanten, Schatten und Vegetation.</li>
+     *   <li>Zusammenfassen: Teilflächen, die nur durch eine schmale Kantenlinie (First, Grat) getrennt sind,
+     *       farblich zusammenpassen und gemeinsam ein Rechteck füllen, bilden ein Dach. Ohne diesen Schritt
+     *       zerfällt jedes Sattel- oder Walmdach in seine unterschiedlich beleuchteten Dachseiten.</li>
+     *   <li>Je Gruppe die orientierte Minimum Bounding Box (OMBB) mittels Rotating Calipers.</li>
+     * </ol>
      */
     private List<BuildingContour> extractRoofCandidates(
-            int[][] smoothed, boolean[][] closedEdges, boolean[][] vegetationMask, boolean[][] shadowMask,
-            double[][] gradMag, int width, int height, int minAreaPx, int maxAreaPx, double minEdgeGradient) {
+            int[] rgb, int[][] smoothed, boolean[][] closedEdges, boolean[][] vegetationMask, boolean[][] shadowMask,
+            double[][] gradMag, int width, int height, int minAreaPx, int maxAreaPx, double minEdgeGradient, double gsd) {
 
-        List<BuildingContour> candidates = new ArrayList<>();
-        boolean[][] visited = new boolean[width][height];
+        int minSegmentPx = Math.max(9, (int) Math.round(MIN_SEGMENT_AREA_M2 / (gsd * gsd)));
+        minSegmentPx = Math.min(minSegmentPx, minAreaPx);
+
+        // labels: 0 = keine Teilfläche; > 0 = Index in segments; LABEL_SMALL = zu kleine Fläche (Kamin, Dachfenster)
+        int[][] labels = new int[width][height];
+        List<RoofSegment> segments = new ArrayList<>();
+        segments.add(null); // Index 0 bleibt frei
 
         // Das Suchfenster (ROI) ist bereits durch width/height abgedeckt; hier nur der Filterrand.
         int minX = 2;
@@ -513,35 +579,40 @@ public class ImageProcessor {
 
         int[] dx4 = {1, -1, 0, 0};
         int[] dy4 = {0, 0, 1, -1};
+        int storeLimit = maxAreaPx * 2;
 
         for (int startX = minX; startX < maxX; startX += 2) {
             for (int startY = minY; startY < maxY; startY += 2) {
-                if (visited[startX][startY] || closedEdges[startX][startY]
+                if (labels[startX][startY] != 0 || closedEdges[startX][startY]
                         || vegetationMask[startX][startY] || shadowMask[startX][startY]) {
                     continue;
                 }
 
                 // Homogenes Region-Growing innerhalb der Canny-Kantenbarrieren
+                int id = segments.size();
+                RoofSegment segment = new RoofSegment();
                 List<Point> regionPixels = new ArrayList<>();
-                List<Point> boundaryPixels = new ArrayList<>();
                 Deque<Point> queue = new ArrayDeque<>();
 
-                int seedLum = smoothed[startX][startY];
-                double runningMean = seedLum;
-                double edgeStrengthSum = 0.0;
-                int edgeHitCount = 0;
+                double runningMean = smoothed[startX][startY];
+                int count = 0;
                 boolean touchesImageBorder = false;
 
                 queue.add(new Point(startX, startY));
-                visited[startX][startY] = true;
+                labels[startX][startY] = id;
 
                 while (!queue.isEmpty()) {
                     Point p = queue.poll();
-                    regionPixels.add(p);
-
-                    if (regionPixels.size() > maxAreaPx * 2) {
-                        // Zu groß (z. B. Hintergrund / Feld / Straße) -> abbrechen
-                        break;
+                    count++;
+                    // Zu große Regionen (Straße, Feld, Hintergrund) werden zu Ende geflutet, aber nicht gespeichert.
+                    // Ein vorzeitiger Abbruch würde den Rest der Fläche später als eigene Kandidaten liefern.
+                    boolean store = count <= storeLimit;
+                    if (store) {
+                        regionPixels.add(p);
+                        int c = rgb[p.y * width + p.x];
+                        segment.sumR += (c >> 16) & 0xFF;
+                        segment.sumG += (c >> 8) & 0xFF;
+                        segment.sumB += c & 0xFF;
                     }
 
                     boolean isBoundary = false;
@@ -557,8 +628,8 @@ public class ImageProcessor {
 
                         if (closedEdges[nx][ny] || shadowMask[nx][ny] || vegetationMask[nx][ny]) {
                             isBoundary = true;
-                            edgeStrengthSum += gradMag[nx][ny];
-                            edgeHitCount++;
+                            segment.edgeStrengthSum += gradMag[nx][ny];
+                            segment.edgeHitCount++;
                             continue;
                         }
 
@@ -566,45 +637,231 @@ public class ImageProcessor {
                         int stepDiff = Math.abs(smoothed[nx][ny] - smoothed[p.x][p.y]);
 
                         if (lumDiff <= 26 && stepDiff <= 12) {
-                            if (!visited[nx][ny]) {
-                                visited[nx][ny] = true;
+                            if (labels[nx][ny] == 0) {
+                                labels[nx][ny] = id;
                                 queue.add(new Point(nx, ny));
-                                runningMean = (runningMean * regionPixels.size() + smoothed[nx][ny]) / (regionPixels.size() + 1.0);
+                                runningMean = (runningMean * count + smoothed[nx][ny]) / (count + 1.0);
                             }
                         } else {
                             isBoundary = true;
-                            edgeStrengthSum += gradMag[nx][ny];
-                            edgeHitCount++;
+                            segment.edgeStrengthSum += gradMag[nx][ny];
+                            segment.edgeHitCount++;
                         }
                     }
 
-                    if (isBoundary) {
-                        boundaryPixels.add(p);
+                    if (isBoundary && store) {
+                        segment.boundary.add(p);
                     }
                 }
 
-                int areaPx = regionPixels.size();
-                if (touchesImageBorder || areaPx < minAreaPx || areaPx > maxAreaPx || boundaryPixels.size() < 12) {
-                    continue;
-                }
-
-                // Berechne die konvexe Hülle und die flächenminimale orientierte Bounding-Box (OMBB)
-                BuildingContour contour = computeOrientedBoundingContour(
-                    boundaryPixels, areaPx, gradMag, width, height, minEdgeGradient);
-                if (contour == null) {
-                    continue;
-                }
-
-                // Normierte Kantenstärke [0..1]
-                double meanEdge = (edgeHitCount > 0) ? (edgeStrengthSum / (edgeHitCount * 255.0)) : 0.0;
-                contour.setEdgeStrength(Math.min(1.0, meanEdge * 2.2));
-
-                if (contour.isRectangular() && contour.getExactArea() >= minAreaPx && contour.getExactArea() <= maxAreaPx * 1.35) {
-                    candidates.add(contour);
+                segment.area = count;
+                boolean usable = !touchesImageBorder && count >= minSegmentPx && count <= maxAreaPx
+                    && segment.boundary.size() >= 8;
+                if (usable) {
+                    segment.group = id;
+                    segments.add(segment);
+                } else {
+                    // Kleine Flächen dürfen beim Nachbarschaftstest überbrückt werden, alles andere trennt.
+                    int mark = (count < minSegmentPx && !touchesImageBorder) ? LABEL_SMALL : LABEL_REJECTED;
+                    if (count <= storeLimit) {
+                        for (Point q : regionPixels) {
+                            labels[q.x][q.y] = mark;
+                        }
+                    } else {
+                        relabel(labels, id, mark, width, height);
+                    }
                 }
             }
         }
+
+        mergeRoofFaces(segments, labels, closedEdges, width, height, maxAreaPx, gsd);
+
+        List<BuildingContour> candidates = new ArrayList<>();
+        for (int id = 1; id < segments.size(); id++) {
+            RoofSegment group = segments.get(id);
+            if (group.group != id) {
+                continue; // in einer anderen Gruppe aufgegangen
+            }
+            int areaPx = group.area;
+            if (areaPx < minAreaPx || areaPx > maxAreaPx || group.boundary.size() < 12) {
+                continue;
+            }
+
+            // Berechne die konvexe Hülle und die flächenminimale orientierte Bounding-Box (OMBB)
+            BuildingContour contour = computeOrientedBoundingContour(
+                group.boundary, areaPx, gradMag, width, height, minEdgeGradient);
+            if (contour == null) {
+                continue;
+            }
+
+            // Normierte Kantenstärke [0..1]
+            double meanEdge = (group.edgeHitCount > 0) ? (group.edgeStrengthSum / (group.edgeHitCount * 255.0)) : 0.0;
+            contour.setEdgeStrength(Math.min(1.0, meanEdge * 2.2));
+
+            if (contour.isRectangular() && contour.getExactArea() >= minAreaPx && contour.getExactArea() <= maxAreaPx * 1.35) {
+                candidates.add(contour);
+            }
+        }
         return candidates;
+    }
+
+    private static final int LABEL_SMALL = -1;
+    private static final int LABEL_REJECTED = -2;
+
+    private static void relabel(int[][] labels, int from, int to, int width, int height) {
+        for (int x = 0; x < width; x++) {
+            for (int y = 0; y < height; y++) {
+                if (labels[x][y] == from) {
+                    labels[x][y] = to;
+                }
+            }
+        }
+    }
+
+    /**
+     * Fasst Teilflächen zu Dächern zusammen. Zwei Teilflächen gelten als Seiten desselben Dachs, wenn sie
+     * <ul>
+     *   <li>nur durch eine schmale Kantenlinie getrennt sind (gemeinsame Grenze ausreichend lang),</li>
+     *   <li>ähnliche Farbanteile haben (die Helligkeit darf sich unterscheiden: Sonnen- und Schattenseite),</li>
+     *   <li>und gemeinsam ein Rechteck ausreichend füllen.</li>
+     * </ul>
+     * Nach dem Aufruf steht in {@link RoofSegment#group} die Kennung der Gruppe; die Gruppe selbst
+     * (Eintrag mit {@code group == Index}) enthält die aufsummierten Werte aller Mitglieder.
+     */
+    private void mergeRoofFaces(List<RoofSegment> segments, int[][] labels, boolean[][] closedEdges,
+            int width, int height, int maxAreaPx, double gsd) {
+        int maxGap = Math.max(2, (int) Math.round(MAX_RIDGE_WIDTH_M / gsd));
+
+        // Gemeinsame Grenzlängen benachbarter Teilflächen: von jedem Pixel nach rechts und unten über
+        // Kantenpixel (und sehr kleine Flächen) hinweg bis zur nächsten Teilfläche laufen.
+        Map<Long, Integer> shared = new HashMap<>();
+        int[] stepX = {1, 0};
+        int[] stepY = {0, 1};
+        for (int x = 0; x < width; x++) {
+            for (int y = 0; y < height; y++) {
+                int a = labels[x][y];
+                if (a <= 0) {
+                    continue;
+                }
+                for (int k = 0; k < 2; k++) {
+                    for (int d = 1; d <= maxGap + 1; d++) {
+                        int qx = x + d * stepX[k];
+                        int qy = y + d * stepY[k];
+                        if (qx >= width || qy >= height) {
+                            break;
+                        }
+                        int b = labels[qx][qy];
+                        if (b == a) {
+                            break;
+                        }
+                        if (b > 0) {
+                            long key = a < b ? ((long) a << 32) | b : ((long) b << 32) | a;
+                            shared.merge(key, 1, Integer::sum);
+                            break;
+                        }
+                        if (!(closedEdges[qx][qy] || b == LABEL_SMALL)) {
+                            break; // Schatten, Vegetation oder verworfene Fläche trennt
+                        }
+                    }
+                }
+            }
+        }
+
+        List<long[]> pairs = new ArrayList<>(shared.size());
+        for (Map.Entry<Long, Integer> e : shared.entrySet()) {
+            pairs.add(new long[] {e.getValue(), e.getKey() >>> 32, e.getKey() & 0xFFFFFFFFL});
+        }
+        pairs.sort((p, q) -> p[0] != q[0] ? Long.compare(q[0], p[0]) : p[1] != q[1] ? Long.compare(p[1], q[1]) : Long.compare(p[2], q[2]));
+
+        // Mehrere Durchläufe: Eine Zusammenfassung kann eine zuvor abgelehnte erst ermöglichen
+        // (Walmdach: erst die beiden Hauptflächen, dann die Giebeldreiecke).
+        boolean changed = true;
+        for (int pass = 0; pass < 6 && changed; pass++) {
+            changed = false;
+            for (long[] pair : pairs) {
+                int ga = findGroup(segments, (int) pair[1]);
+                int gb = findGroup(segments, (int) pair[2]);
+                if (ga == gb) {
+                    continue;
+                }
+                RoofSegment a = segments.get(ga);
+                RoofSegment b = segments.get(gb);
+                if (pair[0] < Math.max(4.0, 0.25 * Math.sqrt(Math.min(a.area, b.area)))) {
+                    continue;
+                }
+                if (a.area + b.area > maxAreaPx) {
+                    continue;
+                }
+                if (Math.hypot(a.chromaR() - b.chromaR(), a.chromaG() - b.chromaG()) > MAX_CHROMA_DISTANCE) {
+                    continue;
+                }
+                double lumA = Math.max(1.0, a.meanLuminance());
+                double lumB = Math.max(1.0, b.meanLuminance());
+                if (Math.max(lumA, lumB) / Math.min(lumA, lumB) > MAX_LUMINANCE_RATIO) {
+                    continue;
+                }
+                List<Point> joint = new ArrayList<>(a.boundary.size() + b.boundary.size());
+                joint.addAll(a.boundary);
+                joint.addAll(b.boundary);
+                double boxArea = minimumBoundingBoxArea(computeConvexHull(joint));
+                if (boxArea <= 1.0 || (a.area + b.area) / boxArea < MIN_MERGED_RECTANGULARITY) {
+                    continue;
+                }
+                // Die größere Gruppe nimmt die kleinere auf
+                if (a.area >= b.area) {
+                    a.absorb(b);
+                    b.group = ga;
+                } else {
+                    b.absorb(a);
+                    a.group = gb;
+                }
+                changed = true;
+            }
+        }
+        for (int id = 1; id < segments.size(); id++) {
+            segments.get(id).group = findGroup(segments, id);
+        }
+    }
+
+    private static int findGroup(List<RoofSegment> segments, int id) {
+        int g = id;
+        while (segments.get(g).group != g) {
+            g = segments.get(g).group;
+        }
+        return g;
+    }
+
+    /** Fläche des kleinsten orientierten Hüllrechtecks einer konvexen Hülle (Rotating Calipers). */
+    private static double minimumBoundingBoxArea(List<Point> hull) {
+        if (hull.size() < 3) {
+            return 0.0;
+        }
+        double best = Double.MAX_VALUE;
+        int n = hull.size();
+        for (int i = 0; i < n; i++) {
+            Point p1 = hull.get(i);
+            Point p2 = hull.get((i + 1) % n);
+            double dx = p2.x - p1.x;
+            double dy = p2.y - p1.y;
+            double len = Math.hypot(dx, dy);
+            if (len < 1e-3) {
+                continue;
+            }
+            double cos = dx / len;
+            double sin = dy / len;
+            double minU = Double.MAX_VALUE, maxU = -Double.MAX_VALUE;
+            double minV = Double.MAX_VALUE, maxV = -Double.MAX_VALUE;
+            for (Point p : hull) {
+                double u = p.x * cos + p.y * sin;
+                double v = -p.x * sin + p.y * cos;
+                minU = Math.min(minU, u);
+                maxU = Math.max(maxU, u);
+                minV = Math.min(minV, v);
+                maxV = Math.max(maxV, v);
+            }
+            best = Math.min(best, Math.max(1.0, maxU - minU) * Math.max(1.0, maxV - minV));
+        }
+        return best;
     }
 
     /**
@@ -957,7 +1214,9 @@ public class ImageProcessor {
             }
 
             double clusterDensityScore = Math.min(1.0, neighborCount / 3.0);
-            double neighborhoodScore = 0.55 * clusterDensityScore + 0.45 * alignBonus;
+            // Ohne Nachbarn gibt es keine Aussage: neutraler Wert statt Abwertung. Sonst würde ein einzeln
+            // stehendes Gebäude (Hof, Hütte) allein wegen seiner Lage verworfen.
+            double neighborhoodScore = (neighborCount == 0) ? 0.5 : 0.55 * clusterDensityScore + 0.45 * alignBonus;
             current.setNeighborhoodScore(neighborhoodScore);
 
             // Gewichtete Gesamtkonfidenz
@@ -972,6 +1231,9 @@ public class ImageProcessor {
             BuildingContour c = candidates.get(i);
             // Akzeptiere Kandidaten mit hoher Gesamtkonfidenz oder starker Geometrie + Schatten
             if (c.getConfidenceScore() >= 0.42 || (c.getRectangularity() > 0.72 && c.getShadowScore() > 0.40)) {
+                if (c.getAspectRatio() > MAX_ASPECT_RATIO) {
+                    continue; // schmale Streifen: Gehwege, Dachränder, Straßenstücke
+                }
                 if (alignWithNeighbors) {
                     c.alignToAngle(targetAngles[i]);
                 }
@@ -981,23 +1243,27 @@ public class ImageProcessor {
         return accepted;
     }
 
+    /** Größtes Seitenverhältnis eines Gebäudes. Schmalere Rechtecke waren in der Messung fast nie Gebäude. */
+    private static final double MAX_ASPECT_RATIO = 4.0;
+
+    /** Ab diesem überdeckten Anteil der kleineren Kontur gelten zwei Kandidaten als dasselbe Objekt. */
+    private static final double MAX_OVERLAP_RATIO = 0.28;
+
     /**
-     * Bereinigt verschachtelte Konturen (Innenhöfe) und überlappende Detektionen mittels
-     * Konfidenz-sortierter Non-Maximum Suppression (NMS).
+     * Bereinigt verschachtelte und überlappende Kandidaten (Non-Maximum Suppression).
+     *
+     * Bei Überlappung bleibt der Kandidat mit der größeren gestützten Fläche (Rechteckfläche mal
+     * Rechteckigkeit) erhalten: Eine einzelne Dachseite soll nicht das ganze Dach verdrängen, zu dem sie gehört.
      */
     private List<BuildingContour> resolveOverlapsAndNesting(List<BuildingContour> contours) {
         List<BuildingContour> sorted = new ArrayList<>(contours);
-        sorted.sort(Comparator.comparingDouble(BuildingContour::getConfidenceScore).reversed());
+        sorted.sort(Comparator.comparingDouble((BuildingContour c) -> c.getExactArea() * c.getRectangularity()).reversed());
 
         List<BuildingContour> result = new ArrayList<>();
         for (BuildingContour candidate : sorted) {
             boolean suppressed = false;
             for (BuildingContour kept : result) {
-                double overlap = candidate.computeOverlapRatio(kept);
-                Rectangle rCand = candidate.getBoundingBox();
-                Rectangle rKept = kept.getBoundingBox();
-
-                if (overlap > 0.28 || rKept.contains(rCand) || rCand.contains(rKept)) {
+                if (candidate.computeOverlapRatio(kept) > MAX_OVERLAP_RATIO) {
                     suppressed = true;
                     break;
                 }

@@ -41,6 +41,39 @@ class BuildingContourTest {
         assertEquals(40.5 * 25.25, contour.getExactArea(), 1e-6, "Fläche nach Gaußscher Trapezformel");
     }
 
+    private static BuildingContour rectangle(double cx, double cy, double w, double h, double angleDeg) {
+        List<Point2D.Double> corners = new ArrayList<>();
+        for (double[] c : SyntheticScene.rectangle(cx, cy, w, h, angleDeg)) {
+            corners.add(new Point2D.Double(c[0], c[1]));
+        }
+        return BuildingContour.fromExactCorners(corners, null, 0.0, 1.0);
+    }
+
+    @Test
+    void overlapRatioUsesTheExactOutlinesNotTheBoundingBoxes() {
+        // Zwei um 45° gedrehte Quadrate nebeneinander: Die achsparallelen Hüllrechtecke überlappen, die Quadrate nicht.
+        BuildingContour a = rectangle(100, 100, 40, 40, 45);
+        BuildingContour b = rectangle(150, 150, 40, 40, 45);
+        assertTrue(a.getBoundingBox().intersects(b.getBoundingBox()), "Voraussetzung: Hüllrechtecke überlappen");
+        assertEquals(0.0, a.computeOverlapRatio(b), EPS);
+
+        // Halbe Überdeckung, unabhängig von Reihenfolge und Umlaufsinn
+        BuildingContour c = rectangle(100, 100, 40, 20, 30);
+        double dx = 20 * Math.cos(Math.toRadians(30));
+        double dy = 20 * Math.sin(Math.toRadians(30));
+        BuildingContour d = rectangle(100 + dx, 100 + dy, 40, 20, 30);
+        assertEquals(0.5, c.computeOverlapRatio(d), 1e-9);
+        assertEquals(0.5, d.computeOverlapRatio(c), 1e-9);
+        List<Point2D.Double> clockwise = new ArrayList<>(d.getExactCorners());
+        java.util.Collections.reverse(clockwise);
+        BuildingContour reversed = BuildingContour.fromExactCorners(clockwise, null, 0.0, 1.0);
+        assertEquals(0.5, c.computeOverlapRatio(reversed), 1e-9);
+        assertEquals(0.5, reversed.computeOverlapRatio(c), 1e-9);
+
+        // Kleine Kontur vollständig in der großen: Anteil bezogen auf die kleinere
+        assertEquals(1.0, rectangle(100, 100, 80, 60, 10).computeOverlapRatio(rectangle(105, 98, 20, 10, 55)), 1e-9);
+    }
+
     @Test
     void exactCornersAreDefensiveCopies() {
         BuildingContour contour = BuildingContour.fromExactCorners(exactRectangle(), null, 0.0, 1.0);

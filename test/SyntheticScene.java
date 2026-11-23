@@ -24,6 +24,12 @@ final class SyntheticScene {
     /** Supersampling-Faktor: simuliert Mischpixel an Dachkanten (Punktantwort des Sensors). */
     private static final int SUPERSAMPLING = 4;
 
+    /**
+     * Mindestfläche für die Tests. Die synthetischen Gebäude sind mit 40–64 x 26–38 px bewusst klein und
+     * lägen teilweise unter dem Standardwert des Plugins; die Geometrietests sollen davon nicht abhängen.
+     */
+    static final double MIN_BUILDING_AREA_M2 = 12.0;
+
     /** Versatz des Schlagschattens gegenüber dem Dach in Pixeln (nach Südosten). */
     static final double SHADOW_OFFSET_PX = 6.0;
 
@@ -93,7 +99,56 @@ final class SyntheticScene {
             fill(g, r, 0, 0);
         }
         g.dispose();
+        return new SyntheticScene(downsample(big, width, height, noiseSeed), truth);
+    }
 
+    /**
+     * Rendert Gebäude, deren Dach aus mehreren unterschiedlich hellen oder unterschiedlich gefärbten
+     * Teilflächen besteht (Sattel- oder Walmdach mit Sonnen- und Schattenseite).
+     *
+     * @param truth   Soll-Umrisse der Gebäude
+     * @param faces   Teilflächen aller Dächer
+     * @param colors  Farbe je Teilfläche
+     * @param shadows true: jedes Gebäude wirft einen Schlagschatten
+     */
+    static SyntheticScene renderFaces(List<double[][]> truth, List<double[][]> faces, List<Color> colors,
+            int width, int height, int background, long noiseSeed, boolean shadows) {
+        int ss = SUPERSAMPLING;
+        BufferedImage big = new BufferedImage(width * ss, height * ss, BufferedImage.TYPE_INT_RGB);
+        Graphics2D g = big.createGraphics();
+        g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+        g.setColor(new Color(background, background - 4, background - 10));
+        g.fillRect(0, 0, width * ss, height * ss);
+        if (shadows) {
+            g.setColor(new Color(25, 25, 30));
+            for (double[][] r : truth) {
+                fill(g, r, SHADOW_OFFSET_PX, SHADOW_OFFSET_PX);
+            }
+        }
+        for (int i = 0; i < faces.size(); i++) {
+            g.setColor(colors.get(i));
+            fill(g, faces.get(i), 0, 0);
+        }
+        g.dispose();
+        return new SyntheticScene(downsample(big, width, height, noiseSeed), truth);
+    }
+
+    /** Punkte aus dem lokalen System eines Gebäudes (Mittelpunkt, Drehwinkel) in Bildkoordinaten. */
+    static double[][] place(double cx, double cy, double angleDeg, double[][] local) {
+        double a = Math.toRadians(angleDeg);
+        double c = Math.cos(a);
+        double s = Math.sin(a);
+        double[][] out = new double[local.length][2];
+        for (int i = 0; i < local.length; i++) {
+            out[i][0] = cx + local[i][0] * c - local[i][1] * s;
+            out[i][1] = cy + local[i][0] * s + local[i][1] * c;
+        }
+        return out;
+    }
+
+    /** Mittelt das überabgetastete Bild auf die Zielauflösung und fügt leichtes Sensorrauschen hinzu. */
+    private static BufferedImage downsample(BufferedImage big, int width, int height, long noiseSeed) {
+        int ss = SUPERSAMPLING;
         BufferedImage img = new BufferedImage(width, height, BufferedImage.TYPE_INT_RGB);
         Random rnd = new Random(noiseSeed);
         for (int y = 0; y < height; y++) {
@@ -112,7 +167,7 @@ final class SyntheticScene {
                 img.setRGB(x, y, (clamp(sr / n + noise) << 16) | (clamp(sg / n + noise) << 8) | clamp(sb / n + noise));
             }
         }
-        return new SyntheticScene(img, truth);
+        return img;
     }
 
     private static void fill(Graphics2D g, double[][] polygon, double dx, double dy) {

@@ -90,11 +90,13 @@ public class BuildingDetectorAction extends JosmAction {
     private final BuildingCreator buildingCreator;
 
     // Persistente Parameter innerhalb der Sitzung für schnelles Arbeiten im HOT Tasking Manager
-    private double lastContrastThreshold = 0.08;
-    private double lastShadowWeight = 0.35;
-    private double lastMinAreaM2 = 12.0;
-    private double lastMaxAreaM2 = 2000.0;
-    private boolean lastAlignNeighbors = true;
+    // Startwerte sind die Standardwerte der Erkennung, mit denen auch "ant eval-real" misst.
+    private static final DetectionConfig DEFAULTS = new DetectionConfig();
+    private double lastContrastThreshold = DEFAULTS.contrastThreshold;
+    private double lastShadowWeight = DEFAULTS.shadowWeight;
+    private double lastMinAreaM2 = DEFAULTS.minBuildingAreaM2;
+    private double lastMaxAreaM2 = DEFAULTS.maxBuildingAreaM2;
+    private boolean lastAlignNeighbors = DEFAULTS.alignWithNeighbors;
     private boolean lastShowDebug = false;
     private SearchArea lastSearchArea = null;
 
