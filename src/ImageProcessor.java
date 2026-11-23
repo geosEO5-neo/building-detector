@@ -219,26 +219,33 @@ public class ImageProcessor {
      * 5x5 Gauß-Filter zur Rauschunterdrückung auf Dachtexturen.
      */
     private int[][] applyGaussian5x5(int[][] src, int width, int height) {
-        int[][] kernel = {
-            {1,  4,  7,  4, 1},
-            {4, 16, 26, 16, 4},
-            {7, 26, 41, 26, 7},
-            {4, 16, 26, 16, 4},
-            {1,  4,  7,  4, 1}
-        };
-        int[][] dst = new int[width][height];
-        for (int x = 2; x < width - 2; x++) {
-            for (int y = 2; y < height - 2; y++) {
-                int sum = 0;
-                for (int dx = -2; dx <= 2; dx++) {
-                    for (int dy = -2; dy <= 2; dy++) {
-                        sum += src[x + dx][y + dy] * kernel[dx + 2][dy + 2];
-                    }
-                }
-                dst[x][y] = sum / 273;
-            }
-        }
-        return dst;
+		int[] kernel = {1, 4, 7, 4, 1};
+		int	divisor = 273;
+
+		int[][]	temp = new int[width][height];
+		int[][]	result = new int[width][height];
+
+		for (int y = 0; y < height; y++) {
+			for (int x = 2; x < width - 2; x++) {
+				int	sum = 0;
+				for (int k = -2; k <= 2; k++) {
+					sum += src[x + k][y} * kernel[k + 2];
+				}
+				temp[x][y] = sum;
+			}
+		}
+
+		for (int x = 2; x < width - 2; x++) {
+			for (int y = 2; y < height - 2; y++) {
+				int	sum = 0;
+				for (int k = -2; k <= 2; k++) {
+					sum += temp[x][y + k] * kernel[k + 2];
+				}
+				result[x][y] = sum / divisor;
+			}
+		}
+		
+		return result;
     }
 
     /**
