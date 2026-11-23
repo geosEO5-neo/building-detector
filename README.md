@@ -79,4 +79,8 @@ xvfb-run ant test-gui    # dasselbe ohne Bildschirm, z. B. auf einem Linux-Serve
 
 ## 🤝 Mitwirken & Lizenz
 
-Dieses Plugin steht unter der **GPL-3.0 Lizenz**. Pull Requests, Bug Reports und Feedback sind in der OSM-Community jederzeit willkommen!
+Dieses Plugin ist freie Software unter der **GNU General Public License, Version 2 oder (nach eigener Wahl) jeder späteren Version** (`GPL-2.0-or-later`) – derselben Lizenz wie JOSM selbst. Der vollständige Lizenztext steht in der Datei [LICENSE](LICENSE). Copyright (C) 2026 Sero.
+
+Die Datei `lib/josm-custom.jar` ist ein lokaler Build von JOSM (Revision 19440) und steht unter der [Lizenz von JOSM](https://josm.openstreetmap.de/browser/trunk/LICENSE).
+
+Pull Requests, Bug Reports und Feedback sind in der OSM-Community jederzeit willkommen!

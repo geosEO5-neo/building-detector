@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+// Copyright (C) 2026 Sero. Lizenz: GNU GPL, Version 2 oder später; siehe Datei LICENSE.
 package org.openstreetmap.josm.plugins.buildingdetector;
 
 import java.awt.Polygon;
