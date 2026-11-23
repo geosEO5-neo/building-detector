@@ -2,6 +2,7 @@ package org.openstreetmap.josm.plugins.buildingdetector;
 
 import java.awt.geom.Area;
 import java.awt.geom.Path2D;
+import java.awt.geom.Point2D;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
@@ -21,10 +22,7 @@ import org.openstreetmap.josm.data.osm.DataSet;
 import org.openstreetmap.josm.data.osm.Node;
 import org.openstreetmap.josm.data.osm.OsmPrimitive;
 import org.openstreetmap.josm.data.osm.Way;
-import org.openstreetmap.josm.data.projection.ProjectionRegistry;
-import org.openstreetmap.josm.gui.MainApplication;
-import org.openstreetmap.josm.gui.MapView;
-import org.openstreetmap.josm.plugins.buildingdetector.ImageProcessor.Point;
+import org.openstreetmap.josm.data.projection.Projection;
 
 import static org.openstreetmap.josm.tools.I18n.tr;
 
@@ -32,8 +30,10 @@ import static org.openstreetmap.josm.tools.I18n.tr;
  * Geodätische Konvertierung erkannter Gebäudekonturen in echte OSM-Vektordaten.
  *
  * Features:
- * - Projektionsgetreue Transformation über MapView.getLatLon(x, y) & ProjectionRegistry
- * - Geodätische Orthogonalisierung (exakte 90°-Winkel im lokalen metrischen EastNorth-System)
+ * - Transformation über die zum Aufnahmezeitpunkt eingefrorene {@link ImageGeoreference}
+ *   (subpixelgenau, Pixelzentrum-Konvention, unabhängig von späterem Verschieben/Zoomen der Karte)
+ * - Orthogonalisierung (exakte 90°-Winkel) in der Kartenprojektion; am Boden rechtwinklig, sofern die
+ *   Projektion winkeltreu ist (Mercator, UTM, Lambert, ...)
  * - Kollisions- und Überlappungsprüfung gegen bestehende building=*-Ways im DataSet
  * - Vollständige Integration in den JOSM UndoRedoHandler (SequenceCommand für Strg+Z)
  * - Automatische Selektion der neu erstellten Gebäude für sofortige Qualitätskontrolle im HOT-Workflow
@@ -41,49 +41,49 @@ import static org.openstreetmap.josm.tools.I18n.tr;
 public class BuildingCreator {
 
     /**
-     * Berechnet die aktuelle Bodenauflösung (Ground Sample Distance in Metern pro Pixel)
-     * in der Mitte der aktuellen JOSM-Kartenansicht.
+     * Ergebnis eines Erstellungslaufs.
+     *
+     * @param created              Anzahl der neu angelegten Gebäude
+     * @param skippedExisting      Verworfen, weil am Ort bereits ein Gebäude kartiert ist
+     * @param skippedOutsideArea   Verworfen, weil (teilweise) außerhalb des zulässigen Bereichs
+     * @param skippedInvalid       Verworfen, weil die Kontur nicht georeferenzierbar war
      */
-    public double computeCurrentMetersPerPixel() {
-        if (MainApplication.getMap() == null || MainApplication.getMap().mapView == null) {
-            return 0.25;
-        }
-        MapView mv = MainApplication.getMap().mapView;
-        int cx = mv.getWidth() / 2;
-        int cy = mv.getHeight() / 2;
-        LatLon p1 = mv.getLatLon(cx - 50, cy);
-        LatLon p2 = mv.getLatLon(cx + 50, cy);
-        if (p1 != null && p2 != null) {
-            double dist100Px = p1.greatCircleDistance(p2);
-            if (dist100Px > 0.01 && !Double.isNaN(dist100Px)) {
-                return dist100Px / 100.0;
-            }
-        }
-        return 0.25;
+    public record CreationResult(int created, int skippedExisting, int skippedOutsideArea, int skippedInvalid) {
     }
+
+    private enum Outcome { CREATED, EXISTING, OUTSIDE_AREA, INVALID }
 
     /**
      * Erstellt OSM-Gebäude über den JOSM-Command-Stack (inkl. Undo/Redo) und wählt sie aus.
      *
-     * @param detectedBuildings Liste der erkannten Gebäudekonturen
+     * @param detectedBuildings Liste der erkannten Gebäudekonturen (Bildkoordinaten)
      * @param dataSet           Aktives OSM-DataSet
-     * @return Anzahl der neu angelegten Gebäude
+     * @param georeference      Georeferenzierung des ausgewerteten Bildes zum Aufnahmezeitpunkt
+     * @param allowedArea       Optionaler zulässiger Bereich in geographischen Koordinaten
+     *                          (x = Länge, y = Breite), z. B. der heruntergeladene Bereich; {@code null} = keine
+     *                          Einschränkung. Gebäude müssen vollständig innerhalb liegen.
+     * @return Zusammenfassung des Laufs
      */
-    public int createOSMBuildings(List<BuildingContour> detectedBuildings, DataSet dataSet) {
-        if (detectedBuildings == null || detectedBuildings.isEmpty() || dataSet == null) {
-            return 0;
-        }
-        if (MainApplication.getMap() == null || MainApplication.getMap().mapView == null) {
-            return 0;
+    public CreationResult createOSMBuildings(
+            List<BuildingContour> detectedBuildings, DataSet dataSet,
+            ImageGeoreference georeference, Area allowedArea) {
+        if (detectedBuildings == null || detectedBuildings.isEmpty() || dataSet == null || georeference == null) {
+            return new CreationResult(0, 0, 0, 0);
         }
 
         List<Command> commands = new LinkedList<>();
         List<OsmPrimitive> createdWays = new ArrayList<>();
+        int existing = 0;
+        int outside = 0;
+        int invalid = 0;
 
         for (BuildingContour contour : detectedBuildings) {
-            Way createdWay = buildOrthogonalizedOsmWay(contour, dataSet, commands);
-            if (createdWay != null) {
-                createdWays.add(createdWay);
+            List<Way> created = new ArrayList<>(1);
+            switch (buildOrthogonalizedOsmWay(contour, dataSet, georeference, allowedArea, commands, created)) {
+                case CREATED -> createdWays.addAll(created);
+                case EXISTING -> existing++;
+                case OUTSIDE_AREA -> outside++;
+                default -> invalid++;
             }
         }
 
@@ -97,51 +97,60 @@ public class BuildingCreator {
             dataSet.setSelected(createdWays);
         }
 
-        return createdWays.size();
+        return new CreationResult(createdWays.size(), existing, outside, invalid);
     }
 
     /**
      * Konvertiert eine Kontur projektionsgetreu, orthogonalisiert ihre Geometrie im
      * lokalen EastNorth-System und prüft auf Konflikte mit bestehenden OSM-Gebäuden.
      */
-    private Way buildOrthogonalizedOsmWay(BuildingContour contour, DataSet dataSet, List<Command> commands) {
-        List<Point> pixelCorners = contour.getCorners();
+    private Outcome buildOrthogonalizedOsmWay(
+            BuildingContour contour, DataSet dataSet, ImageGeoreference georeference, Area allowedArea,
+            List<Command> commands, List<Way> created) {
+        List<Point2D.Double> pixelCorners = contour.getExactCorners();
         if (pixelCorners.size() < 4) {
-            return null;
+            return Outcome.INVALID;
         }
 
-        // 1. Pixelkoordinaten exakt über MapView in LatLon und EastNorth konvertieren
+        // 1. Subpixelgenaue Bildkoordinaten über die eingefrorene Georeferenzierung in EastNorth überführen
+        Projection projection = georeference.getProjection();
         List<EastNorth> eastNorthCorners = new ArrayList<>(pixelCorners.size());
-        for (Point pt : pixelCorners) {
-            LatLon ll = convertPixelToLatLon(pt);
-            if (ll == null) {
-                return null;
-            }
-            EastNorth en = ProjectionRegistry.getProjection().latlon2eastNorth(ll);
-            if (en == null) {
-                return null;
+        for (Point2D.Double pt : pixelCorners) {
+            EastNorth en = georeference.pixelToEastNorth(pt.x, pt.y);
+            if (en == null || !en.isValid()) {
+                return Outcome.INVALID;
             }
             eastNorthCorners.add(en);
         }
 
-        // 2. Exakte geodätische Orthogonalisierung (Rechtwinkligkeit für HOT-Validierung erzwingen)
+        // 2. Exakte Orthogonalisierung (Rechtwinkligkeit für HOT-Validierung erzwingen)
         List<EastNorth> squaredEastNorth = orthogonalizeRectangleEastNorth(eastNorthCorners);
 
         List<LatLon> squaredLatLons = new ArrayList<>(squaredEastNorth.size());
         for (EastNorth en : squaredEastNorth) {
-            LatLon ll = ProjectionRegistry.getProjection().eastNorth2latlon(en);
+            LatLon ll = projection.eastNorth2latlon(en);
             if (ll == null || !ll.isValid()) {
-                return null;
+                return Outcome.INVALID;
             }
             squaredLatLons.add(ll);
         }
 
-        // 3. Prüfe auf Kollision / Überlappung mit bereits im DataSet vorhandenen Gebäuden
-        if (conflictsWithExistingBuilding(squaredLatLons, dataSet)) {
-            return null;
+        // 3. Nur Gebäude zulassen, die vollständig im zulässigen (z. B. heruntergeladenen) Bereich liegen:
+        //    außerhalb davon sind vorhandene OSM-Gebäude nicht bekannt, Duplikate wären nicht erkennbar.
+        if (allowedArea != null) {
+            for (LatLon ll : squaredLatLons) {
+                if (!allowedArea.contains(ll.lon(), ll.lat())) {
+                    return Outcome.OUTSIDE_AREA;
+                }
+            }
         }
 
-        // 4. Erzeuge OSM-Nodes und geschlossenen Way über AddCommands
+        // 4. Prüfe auf Kollision / Überlappung mit bereits im DataSet vorhandenen Gebäuden
+        if (conflictsWithExistingBuilding(squaredLatLons, dataSet)) {
+            return Outcome.EXISTING;
+        }
+
+        // 5. Erzeuge OSM-Nodes und geschlossenen Way über AddCommands
         List<Node> buildingNodes = new ArrayList<>(squaredLatLons.size() + 1);
         for (LatLon ll : squaredLatLons) {
             Node node = new Node(ll);
@@ -158,13 +167,14 @@ public class BuildingCreator {
         buildingWay.setKeys(tags);
 
         commands.add(new AddCommand(dataSet, buildingWay));
-        return buildingWay;
+        created.add(buildingWay);
+        return Outcome.CREATED;
     }
 
     /**
-     * Erzwingt exakte 90°-Innenwinkel eines 4-Eck-Gebäudes im lokalen metrischen
-     * Koordinatensystem (EastNorth), sodass das Gebäude die JOSM-Validierung ("Q"-Taste)
-     * fehlerfrei besteht.
+     * Erzwingt exakte 90°-Innenwinkel eines 4-Eck-Gebäudes in den projizierten Koordinaten
+     * (EastNorth), sodass das Gebäude die JOSM-Validierung ("Q"-Taste) fehlerfrei besteht.
+     * In winkeltreuen Projektionen entspricht das einem rechten Winkel am Boden.
      */
     private List<EastNorth> orthogonalizeRectangleEastNorth(List<EastNorth> pts) {
         if (pts.size() != 4) {
@@ -225,17 +235,6 @@ public class BuildingCreator {
             squared.add(new EastNorth(east, north));
         }
         return squared;
-    }
-
-    /**
-     * Nutzt die native JOSM-MapView-Transformation unter Berücksichtigung der aktiven Kartenprojektion.
-     */
-    private LatLon convertPixelToLatLon(Point pixelPoint) {
-        if (MainApplication.getMap() == null || MainApplication.getMap().mapView == null) {
-            return null;
-        }
-        MapView mapView = MainApplication.getMap().mapView;
-        return mapView.getLatLon(pixelPoint.x, pixelPoint.y);
     }
 
     /**
