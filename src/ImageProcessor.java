@@ -118,7 +118,7 @@ public class ImageProcessor {
             //    b) Lokale adaptive Dach-Segmentierung (helle/farbhomogene Nicht-Vegetations-Objekte)
             List<BuildingContour> candidates = extractRoofCandidates(
                 smoothed, closedEdges, vegetationMask, shadowMask, gradMag,
-                width, height, minAreaPx, maxAreaPx
+                width, height, minAreaPx, maxAreaPx, cannyLowThreshold(config.contrastThreshold)
             );
 
             // 8. Schattenwurf-Bewertung (3D-Verifikation entlang des geschätzten Schattenvektors)
@@ -380,8 +380,8 @@ public class ImageProcessor {
         }
 
         // Hysterese-Schwellenwerte
-        double highThresh = Math.max(18.0, Math.min(180.0, contrastThreshold * 255.0 * 1.35));
-        double lowThresh = highThresh * 0.48;
+        double highThresh = cannyHighThreshold(contrastThreshold);
+        double lowThresh = cannyLowThreshold(contrastThreshold);
 
         boolean[][] edges = new boolean[width][height];
         Deque<Point> queue = new ArrayDeque<>();
@@ -412,6 +412,16 @@ public class ImageProcessor {
             }
         }
         return edges;
+    }
+
+    /** Oberer Hysterese-Schwellenwert des Canny-Detektors auf der normierten Gradientenskala [0..255]. */
+    private static double cannyHighThreshold(double contrastThreshold) {
+        return Math.max(18.0, Math.min(180.0, contrastThreshold * 255.0 * 1.35));
+    }
+
+    /** Unterer Hysterese-Schwellenwert des Canny-Detektors auf der normierten Gradientenskala [0..255]. */
+    private static double cannyLowThreshold(double contrastThreshold) {
+        return cannyHighThreshold(contrastThreshold) * 0.48;
     }
 
     /**
@@ -488,7 +498,7 @@ public class ImageProcessor {
      */
     private List<BuildingContour> extractRoofCandidates(
             int[][] smoothed, boolean[][] closedEdges, boolean[][] vegetationMask, boolean[][] shadowMask,
-            double[][] gradMag, int width, int height, int minAreaPx, int maxAreaPx) {
+            double[][] gradMag, int width, int height, int minAreaPx, int maxAreaPx, double minEdgeGradient) {
 
         List<BuildingContour> candidates = new ArrayList<>();
         boolean[][] visited = new boolean[width][height];
@@ -577,7 +587,8 @@ public class ImageProcessor {
                 }
 
                 // Berechne die konvexe Hülle und die flächenminimale orientierte Bounding-Box (OMBB)
-                BuildingContour contour = computeOrientedBoundingContour(boundaryPixels, areaPx);
+                BuildingContour contour = computeOrientedBoundingContour(
+                    boundaryPixels, areaPx, gradMag, width, height, minEdgeGradient);
                 if (contour == null) {
                     continue;
                 }
@@ -598,7 +609,9 @@ public class ImageProcessor {
      * Berechnet über die konvexe Hülle (Andrew's Monotone Chain) und Rotating Calipers
      * das exakt orientierte minimale Hüllrechteck (OMBB) der Gebäuderegion.
      */
-    private BuildingContour computeOrientedBoundingContour(List<Point> boundaryPoints, int truePixelCount) {
+    private BuildingContour computeOrientedBoundingContour(
+            List<Point> boundaryPoints, int truePixelCount,
+            double[][] gradMag, int width, int height, double minEdgeGradient) {
         List<Point> hull = computeConvexHull(boundaryPoints);
         if (hull.size() < 3) {
             return null;
@@ -657,9 +670,20 @@ public class ImageProcessor {
             return null;
         }
 
-        // Rücktransformation der 4 orthogonalen OMBB-Eckpunkte in Bildkoordinaten
         double cos = Math.cos(bestAngle);
         double sin = Math.sin(bestAngle);
+
+        // Die OMBB umschließt bisher nur die Zentren der Randpixel einer Region, die ihrerseits vor der
+        // Kante endet (Glättung, Kantenpixel). Ohne Korrektur fällt das Rechteck systematisch zu klein aus.
+        // Jede Seite wird deshalb auf das Gradientenmaximum, also die tatsächliche Dachkante, verschoben.
+        double[] box = refineSidesToGradientMaximum(
+            cos, sin, bestMinU, bestMaxU, bestMinV, bestMaxV, gradMag, width, height, minEdgeGradient);
+        bestMinU = box[0];
+        bestMaxU = box[1];
+        bestMinV = box[2];
+        bestMaxV = box[3];
+
+        // Rücktransformation der 4 orthogonalen OMBB-Eckpunkte in Bildkoordinaten
         double[][] uvCorners = {
             {bestMinU, bestMinV},
             {bestMaxU, bestMinV},
@@ -680,6 +704,112 @@ public class ImageProcessor {
         double dominantAngle = (lenU >= lenV) ? bestAngle : (bestAngle + Math.PI / 2.0);
 
         return BuildingContour.fromExactCorners(corners, boundaryPoints, dominantAngle, rectangularity);
+    }
+
+    /** Suchfenster der Kantenverfeinerung entlang der Seitennormalen in Pixeln (negativ = nach innen). */
+    private static final double REFINE_MIN_OFFSET_PX = -1.5;
+    private static final double REFINE_MAX_OFFSET_PX = 3.5;
+    private static final double REFINE_STEP_PX = 0.25;
+
+    /**
+     * Subpixelgenaue Kantenverfeinerung der OMBB: Jede der vier Rechteckseiten wird parallel zu sich
+     * selbst auf die Lage verschoben, an der der mittlere Gradientenbetrag entlang der Seite maximal ist.
+     * Orientierung und Rechtwinkligkeit bleiben unverändert.
+     *
+     * Findet sich im Suchfenster kein signifikantes inneres Maximum (z. B. kontrastarme Dachseite), wird
+     * die Seite nur um die halbe Pixelausdehnung nach außen gesetzt, sodass das Rechteck die Flächen der
+     * Randpixel statt nur deren Zentren umschließt.
+     *
+     * @return {minU, maxU, minV, maxV} des verfeinerten Rechtecks im gedrehten (u, v)-System
+     */
+    private double[] refineSidesToGradientMaximum(
+            double cos, double sin, double minU, double maxU, double minV, double maxV,
+            double[][] gradMag, int width, int height, double minEdgeGradient) {
+
+        // Halbe Ausdehnung eines Pixelquadrats in Richtung der Rechteckachsen
+        double pixelHalfExtent = 0.5 * (Math.abs(cos) + Math.abs(sin));
+
+        double offMinU = refineSideOffset(cos, sin, minU, -1.0, minV, maxV, true, gradMag, width, height, minEdgeGradient);
+        double offMaxU = refineSideOffset(cos, sin, maxU, +1.0, minV, maxV, true, gradMag, width, height, minEdgeGradient);
+        double offMinV = refineSideOffset(cos, sin, minV, -1.0, minU, maxU, false, gradMag, width, height, minEdgeGradient);
+        double offMaxV = refineSideOffset(cos, sin, maxV, +1.0, minU, maxU, false, gradMag, width, height, minEdgeGradient);
+
+        return new double[] {
+            minU - (Double.isNaN(offMinU) ? pixelHalfExtent : offMinU),
+            maxU + (Double.isNaN(offMaxU) ? pixelHalfExtent : offMaxU),
+            minV - (Double.isNaN(offMinV) ? pixelHalfExtent : offMinV),
+            maxV + (Double.isNaN(offMaxV) ? pixelHalfExtent : offMaxV)
+        };
+    }
+
+    /**
+     * Sucht für eine Rechteckseite den Versatz entlang der nach außen gerichteten Normalen, bei dem das
+     * Gradientenprofil sein Maximum hat (Parabel-Interpolation zwischen den Abtastschritten).
+     *
+     * @param sideCoord  Lage der Seite auf ihrer Normalenachse (u bzw. v)
+     * @param outward    +1 bzw. -1: Richtung der Außennormalen auf dieser Achse
+     * @param from       Beginn der Seite auf der Tangentenachse
+     * @param to         Ende der Seite auf der Tangentenachse
+     * @param normalIsU  true, wenn die Seitennormale die u-Achse ist
+     * @return Versatz nach außen in Pixeln oder NaN, wenn kein signifikantes inneres Maximum existiert
+     */
+    private double refineSideOffset(
+            double cos, double sin, double sideCoord, double outward, double from, double to, boolean normalIsU,
+            double[][] gradMag, int width, int height, double minEdgeGradient) {
+
+        // Eckbereiche aussparen: dort überlagern sich die Gradienten der Nachbarseiten
+        double length = to - from;
+        double margin = Math.max(1.0, 0.15 * length);
+        double start = from + margin;
+        double end = to - margin;
+        if (end - start < 3.0) {
+            return Double.NaN;
+        }
+        int samples = Math.max(4, (int) Math.round(end - start) + 1);
+
+        int steps = (int) Math.round((REFINE_MAX_OFFSET_PX - REFINE_MIN_OFFSET_PX) / REFINE_STEP_PX) + 1;
+        double[] profile = new double[steps];
+        int best = -1;
+        for (int i = 0; i < steps; i++) {
+            double normalCoord = sideCoord + outward * (REFINE_MIN_OFFSET_PX + i * REFINE_STEP_PX);
+            double sum = 0.0;
+            for (int k = 0; k < samples; k++) {
+                double tangentCoord = start + (end - start) * k / (samples - 1);
+                double u = normalIsU ? normalCoord : tangentCoord;
+                double v = normalIsU ? tangentCoord : normalCoord;
+                sum += sampleBilinear(gradMag, u * cos - v * sin, u * sin + v * cos, width, height);
+            }
+            profile[i] = sum / samples;
+            if (best < 0 || profile[i] > profile[best]) {
+                best = i;
+            }
+        }
+
+        // Nur ein inneres, ausreichend starkes Maximum ist eine verlässliche Kantenlage
+        if (best <= 0 || best >= steps - 1 || profile[best] < minEdgeGradient) {
+            return Double.NaN;
+        }
+        double left = profile[best - 1];
+        double mid = profile[best];
+        double right = profile[best + 1];
+        double denom = left - 2.0 * mid + right;
+        double subStep = (denom < -1e-9) ? 0.5 * (left - right) / denom : 0.0;
+        return REFINE_MIN_OFFSET_PX + (best + subStep) * REFINE_STEP_PX;
+    }
+
+    /** Bilineare Interpolation eines Rasters an einer subpixelgenauen Position (außerhalb des Bildes: 0). */
+    private static double sampleBilinear(double[][] raster, double x, double y, int width, int height) {
+        int x0 = (int) Math.floor(x);
+        int y0 = (int) Math.floor(y);
+        if (x0 < 0 || y0 < 0 || x0 + 1 >= width || y0 + 1 >= height) {
+            return 0.0;
+        }
+        double fx = x - x0;
+        double fy = y - y0;
+        return raster[x0][y0] * (1.0 - fx) * (1.0 - fy)
+             + raster[x0 + 1][y0] * fx * (1.0 - fy)
+             + raster[x0][y0 + 1] * (1.0 - fx) * fy
+             + raster[x0 + 1][y0 + 1] * fx * fy;
     }
 
     /**
