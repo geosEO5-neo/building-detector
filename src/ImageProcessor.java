@@ -39,7 +39,7 @@ public class ImageProcessor {
         public double shadowWeight = 0.35;        // Gewicht des Schattenwurfs bei der 3D-Prüfung [0..1]
         public boolean alignWithNeighbors = true; // Gebäudefluchten an Nachbarschaft angleichen
         public boolean showDebugWindows = false;  // Debug-Ansicht für Zwischenschritte
-        public Rectangle regionOfInterest = null; // Optionales Suchfenster im Bild
+        public Rectangle regionOfInterest = null; // Optionales Suchfenster in Bildkoordinaten (null = gesamtes Bild)
     }
 
     /**
@@ -53,14 +53,28 @@ public class ImageProcessor {
 
     /**
      * Hauptpipeline zur fernerkundlichen Gebäudedetektion.
+     *
+     * Ist {@link DetectionConfig#regionOfInterest} gesetzt, läuft die gesamte Pipeline nur auf diesem
+     * Bildausschnitt (in ROI-lokalen Koordinaten). Die zurückgegebenen Konturen liegen immer in den
+     * Koordinaten des übergebenen Gesamtbildes.
      */
     public List<BuildingContour> detectBuildings(BufferedImage aerialImage, DetectionConfig config) {
         if (aerialImage == null) {
             return Collections.emptyList();
         }
 
-        int width = aerialImage.getWidth();
-        int height = aerialImage.getHeight();
+        // Suchfenster (ROI) auf die Bildgrenzen beschneiden; ohne ROI wird das gesamte Bild verarbeitet.
+        Rectangle imageBounds = new Rectangle(0, 0, aerialImage.getWidth(), aerialImage.getHeight());
+        Rectangle roi = (config.regionOfInterest != null)
+            ? config.regionOfInterest.intersection(imageBounds)
+            : imageBounds;
+        if (roi.isEmpty()) {
+            return Collections.emptyList();
+        }
+
+        // Ab hier arbeitet die gesamte Pipeline in ROI-lokalen Koordinaten.
+        int width = roi.width;
+        int height = roi.height;
         double gsd = Math.max(0.03, config.metersPerPixel);
 
         // Umrechnung der geodätischen Flächengrenzen (m²) in Pixel² anhand der aktuellen GSD
@@ -71,7 +85,7 @@ public class ImageProcessor {
             // 1. Spektrale Zerlegung: Luminanz, Vegetationsmaske (ExG) und Schattenmaske extrahieren
             int[][] luminance = new int[width][height];
             boolean[][] vegetationMask = new boolean[width][height];
-            extractSpectralChannels(aerialImage, luminance, vegetationMask);
+            extractSpectralChannels(aerialImage, roi, luminance, vegetationMask);
 
             // 2. Robuste Perzentil-Kontrastspreizung (2% - 98%) & 5x5 Gauß-Glättung
             int[][] enhanced = stretchContrastPercentile(luminance, width, height, 0.02, 0.98);
@@ -103,7 +117,7 @@ public class ImageProcessor {
             //    b) Lokale adaptive Dach-Segmentierung (helle/farbhomogene Nicht-Vegetations-Objekte)
             List<BuildingContour> candidates = extractRoofCandidates(
                 smoothed, closedEdges, vegetationMask, shadowMask, gradMag,
-                width, height, minAreaPx, maxAreaPx, config.regionOfInterest
+                width, height, minAreaPx, maxAreaPx
             );
 
             // 8. Schattenwurf-Bewertung (3D-Verifikation entlang des geschätzten Schattenvektors)
@@ -121,7 +135,15 @@ public class ImageProcessor {
             );
 
             // 10. Topologische Bereinigung (Verschachtelte Konturen & Non-Maximum Suppression bei Überlappung)
-            return resolveOverlapsAndNesting(verified);
+            List<BuildingContour> result = resolveOverlapsAndNesting(verified);
+
+            // 11. Rücktransformation von ROI-lokalen Koordinaten in die Koordinaten des Gesamtbildes
+            if (roi.x != 0 || roi.y != 0) {
+                for (BuildingContour contour : result) {
+                    contour.translate(roi.x, roi.y);
+                }
+            }
+            return result;
 
         } catch (Exception e) {
             e.printStackTrace();
@@ -131,12 +153,13 @@ public class ImageProcessor {
 
     /**
      * Extrahiert Luminanz und markiert Vegetation mittels Excess Green Index (ExG = 2G - R - B)
-     * sowie hoher Grün-Sättigung.
+     * sowie hoher Grün-Sättigung. Gelesen wird nur der Ausschnitt {@code roi}; die Ergebnis-Arrays
+     * sind ROI-lokal indiziert.
      */
-    private void extractSpectralChannels(BufferedImage img, int[][] luminance, boolean[][] vegetationMask) {
-        int width = img.getWidth();
-        int height = img.getHeight();
-		int[] pixels = img.getRGB(0, 0, width, height, null, 0, width);
+    private void extractSpectralChannels(BufferedImage img, Rectangle roi, int[][] luminance, boolean[][] vegetationMask) {
+        int width = roi.width;
+        int height = roi.height;
+		int[] pixels = img.getRGB(roi.x, roi.y, width, height, null, 0, width);
 
         for (int i = 0, y = 0; y < height; y++) {
             for (int x = 0; x < width; x++, i++) {
@@ -464,15 +487,16 @@ public class ImageProcessor {
      */
     private List<BuildingContour> extractRoofCandidates(
             int[][] smoothed, boolean[][] closedEdges, boolean[][] vegetationMask, boolean[][] shadowMask,
-            double[][] gradMag, int width, int height, int minAreaPx, int maxAreaPx, Rectangle roi) {
+            double[][] gradMag, int width, int height, int minAreaPx, int maxAreaPx) {
 
         List<BuildingContour> candidates = new ArrayList<>();
         boolean[][] visited = new boolean[width][height];
 
-        int minX = (roi != null) ? Math.max(2, roi.x) : 2;
-        int minY = (roi != null) ? Math.max(2, roi.y) : 2;
-        int maxX = (roi != null) ? Math.min(width - 2, roi.x + roi.width) : width - 2;
-        int maxY = (roi != null) ? Math.min(height - 2, roi.y + roi.height) : height - 2;
+        // Das Suchfenster (ROI) ist bereits durch width/height abgedeckt; hier nur der Filterrand.
+        int minX = 2;
+        int minY = 2;
+        int maxX = width - 2;
+        int maxY = height - 2;
 
         int[] dx4 = {1, -1, 0, 0};
         int[] dy4 = {0, 0, 1, -1};

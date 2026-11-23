@@ -204,6 +204,32 @@ public class BuildingContour {
     }
 
     /**
+     * Verschiebt die Kontur (Eckpunkte und rohe Randpunkte) um den angegebenen Versatz,
+     * z. B. von ROI-lokalen Koordinaten zurück in die Koordinaten des Gesamtbildes.
+     * Schwerpunkt, Bounding-Box und Fläche werden aus den Eckpunkten berechnet und folgen automatisch.
+     *
+     * @param dx Versatz in x-Richtung (Pixel)
+     * @param dy Versatz in y-Richtung (Pixel)
+     */
+    public void translate(int dx, int dy) {
+        if (dx == 0 && dy == 0) {
+            return;
+        }
+        // Neue Point-Objekte anlegen: Eck- und Randpunktliste können sich Instanzen teilen,
+        // ein Verschieben an Ort und Stelle würde solche Punkte doppelt versetzen.
+        this.corners = translatePoints(corners, dx, dy);
+        this.rawBoundaryPoints = translatePoints(rawBoundaryPoints, dx, dy);
+    }
+
+    private static List<Point> translatePoints(List<Point> points, int dx, int dy) {
+        List<Point> moved = new ArrayList<>(points.size());
+        for (Point p : points) {
+            moved.add(new Point(p.x + dx, p.y + dy));
+        }
+        return moved;
+    }
+
+    /**
      * Berechnet die Schnittfläche über Vereinigungsfläche (IoU) der Bounding-Boxen
      * bzw. prüft auf starke räumliche Überlappung zweier Gebäudekonturen.
      */
