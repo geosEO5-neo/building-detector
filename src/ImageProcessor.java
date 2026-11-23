@@ -216,10 +216,14 @@ public class ImageProcessor {
 
     /**
      * 5x5 Gauß-Filter zur Rauschunterdrückung auf Dachtexturen.
+     *
+     * Separierbare Näherung des ursprünglichen 5x5-Kernels: zwei 1D-Durchläufe mit [1 4 7 4 1].
+     * Das äußere Produkt hat die Gewichtssumme 17 * 17 = 289 (nicht 273 wie der nicht exakt
+     * separierbare Originalkernel); nur mit diesem Divisor bleibt das Ergebnis in [0..255].
      */
     private int[][] applyGaussian5x5(int[][] src, int width, int height) {
 		int[] kernel = {1, 4, 7, 4, 1};
-		int	divisor = 273;
+		int	divisor = 289;
 
 		int[][]	temp = new int[width][height];
 		int[][]	result = new int[width][height];
